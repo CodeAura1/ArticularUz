@@ -54,11 +54,16 @@ WEBSITE_IMAGE = "LOGO ARTICULARUZ (2).png"
 # BASEROW TABLES
 # =====================================================================
 
+# IMPORTANT:
+# Replace the three YOUR_... values with the actual Baserow table IDs.
 BASEROW_TABLE_IDS = {
     "Users": "1237476",
     "Tashkent": "1241776",
+    "Tashkent Region": "1241955",
     "Bukhara": "1241780",
     "Samarkand": "1241781",
+    "Andijan": "1241953",
+    "Fergana": "1241951",
 }
 
 
@@ -68,14 +73,20 @@ BASEROW_TABLE_IDS = {
 
 LOCATIONS = {
     "Tashkent": "https://t.me/+your_tashkent_group_invite",
+    "Tashkent Region": "https://t.me/+your_tashkent_region_group_invite",
     "Samarkand": "https://t.me/+your_samarkand_group_invite",
     "Bukhara": "https://t.me/+your_bukhara_group_invite",
+    "Andijan": "https://t.me/+your_andijan_group_invite",
+    "Fergana": "https://t.me/+your_fergana_group_invite",
 }
 
 VALID_CITIES = (
     "Tashkent",
-    "Bukhara",
+    "Tashkent Region",
     "Samarkand",
+    "Bukhara",
+    "Andijan",
+    "Fergana",
 )
 
 
@@ -197,10 +208,7 @@ def _get_baserow_rows_sync(
         request,
         timeout=15,
     ) as response:
-
-        data = json.loads(
-            response.read().decode("utf-8")
-        )
+        data = json.loads(response.read().decode("utf-8"))
 
     return data.get("results", [])
 
@@ -209,25 +217,16 @@ def _get_baserow_rows_sync(
 # BASEROW: DELETE USER FROM CITY TABLES
 # =====================================================================
 
-def _remove_user_from_city_tables_sync(
-    user_id: int,
-):
+def _remove_user_from_city_tables_sync(user_id: int):
     if not BASEROW_TOKEN:
         return
 
     for city in VALID_CITIES:
-
         try:
-
-            rows = _get_baserow_rows_sync(
-                city,
-                user_id,
-            )
-
+            rows = _get_baserow_rows_sync(city, user_id)
             table_id = BASEROW_TABLE_IDS[city]
 
             for row in rows:
-
                 row_id = row["id"]
 
                 delete_url = (
@@ -245,7 +244,6 @@ def _remove_user_from_city_tables_sync(
                     delete_request,
                     timeout=15,
                 ) as response:
-
                     if not (200 <= response.status < 300):
                         raise RuntimeError(
                             f"Failed deleting row {row_id} "
@@ -259,7 +257,6 @@ def _remove_user_from_city_tables_sync(
                 )
 
         except urllib.error.HTTPError as exc:
-
             body = exc.read().decode(
                 "utf-8",
                 errors="replace",
@@ -273,16 +270,13 @@ def _remove_user_from_city_tables_sync(
             )
 
         except Exception:
-
             logger.exception(
                 "Unexpected error removing user from %s",
                 city,
             )
 
 
-async def remove_user_from_city_tables(
-    user_id: int,
-):
+async def remove_user_from_city_tables(user_id: int):
     await asyncio.to_thread(
         _remove_user_from_city_tables_sync,
         user_id,
@@ -309,7 +303,6 @@ def _sync_users_table_sync(
     )
 
     if rows:
-
         row = rows[0]
         row_id = row["id"]
 
@@ -322,9 +315,7 @@ def _sync_users_table_sync(
             location=location,
         )
 
-        existing_registered_at = row.get(
-            "Registered At"
-        )
+        existing_registered_at = row.get("Registered At")
 
         if existing_registered_at:
             payload["Registered At"] = existing_registered_at
@@ -348,7 +339,6 @@ def _sync_users_table_sync(
             request,
             timeout=15,
         ) as response:
-
             if not (200 <= response.status < 300):
                 raise RuntimeError(
                     f"Users update failed: HTTP {response.status}"
@@ -361,7 +351,6 @@ def _sync_users_table_sync(
         )
 
     else:
-
         payload = _baserow_payload(
             user_id=user_id,
             username=username,
@@ -388,7 +377,6 @@ def _sync_users_table_sync(
             request,
             timeout=15,
         ) as response:
-
             if not (200 <= response.status < 300):
                 raise RuntimeError(
                     f"Users creation failed: HTTP {response.status}"
@@ -423,13 +411,11 @@ def _add_user_to_city_sync(
     )
 
     if existing_rows:
-
         logger.info(
             "Telegram ID %s already exists in %s",
             user_id,
             city,
         )
-
         return
 
     payload = _baserow_payload(
@@ -458,7 +444,6 @@ def _add_user_to_city_sync(
         request,
         timeout=15,
     ) as response:
-
         if not (200 <= response.status < 300):
             raise RuntimeError(
                 f"{city} creation failed: HTTP {response.status}"
@@ -484,19 +469,13 @@ def _sync_user_to_baserow_sync(
     location: str,
 ):
     if not BASEROW_TOKEN:
-
         logger.warning(
             "BASEROW_TOKEN is not configured."
         )
-
         return
 
     try:
-
-        # -------------------------------------------------------------
         # 1. Users table
-        # -------------------------------------------------------------
-
         _sync_users_table_sync(
             user_id=user_id,
             username=username,
@@ -506,20 +485,11 @@ def _sync_user_to_baserow_sync(
             location=location,
         )
 
-        # -------------------------------------------------------------
         # 2. Remove old city rows
-        # -------------------------------------------------------------
+        _remove_user_from_city_tables_sync(user_id)
 
-        _remove_user_from_city_tables_sync(
-            user_id
-        )
-
-        # -------------------------------------------------------------
         # 3. Add user to selected city
-        # -------------------------------------------------------------
-
         if location in VALID_CITIES:
-
             _add_user_to_city_sync(
                 city=location,
                 user_id=user_id,
@@ -530,7 +500,6 @@ def _sync_user_to_baserow_sync(
             )
 
     except urllib.error.HTTPError as exc:
-
         body = exc.read().decode(
             "utf-8",
             errors="replace",
@@ -547,14 +516,12 @@ def _sync_user_to_baserow_sync(
         TimeoutError,
         OSError,
     ) as exc:
-
         logger.error(
             "Baserow connection error: %s",
             exc,
         )
 
     except Exception:
-
         logger.exception(
             "Unexpected Baserow synchronization error"
         )
@@ -584,41 +551,28 @@ async def sync_user_to_baserow(
 # =====================================================================
 
 DB_PATH = os.path.join(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    ),
+    os.path.dirname(os.path.abspath(__file__)),
     "registrations.db",
 )
 
 
 def get_db_connection():
-
     conn = sqlite3.connect(
         DB_PATH,
         timeout=30,
     )
 
-    conn.execute(
-        "PRAGMA journal_mode=WAL"
-    )
-
-    conn.execute(
-        "PRAGMA busy_timeout=30000"
-    )
-
-    conn.execute(
-        "PRAGMA foreign_keys=ON"
-    )
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
 
     return conn
 
 
 def init_db():
-
     conn = get_db_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute(
@@ -677,7 +631,6 @@ def init_db():
         conn.commit()
 
     finally:
-
         conn.close()
 
 
@@ -693,11 +646,9 @@ def save_user(
     phone: str,
     location: str,
 ):
-
     conn = get_db_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute(
@@ -732,16 +683,13 @@ def save_user(
         conn.commit()
 
     finally:
-
         conn.close()
 
 
 def get_user(user_id: int):
-
     conn = get_db_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute(
@@ -762,16 +710,13 @@ def get_user(user_id: int):
         return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
 def delete_user(user_id: int):
-
     conn = get_db_connection()
 
     try:
-
         conn.execute(
             "DELETE FROM users WHERE user_id = ?",
             (user_id,),
@@ -780,7 +725,6 @@ def delete_user(user_id: int):
         conn.commit()
 
     finally:
-
         conn.close()
 
 
@@ -788,14 +732,10 @@ def delete_user(user_id: int):
 # EVENT DATABASE
 # =====================================================================
 
-def get_active_event_registration(
-    user_id: int,
-):
-
+def get_active_event_registration(user_id: int):
     conn = get_db_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute(
@@ -816,7 +756,6 @@ def get_active_event_registration(
         return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
@@ -824,11 +763,9 @@ def create_event_registration(
     user_id: int,
     location: str,
 ):
-
     conn = get_db_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute(
@@ -869,18 +806,13 @@ def create_event_registration(
         return registration_id
 
     finally:
-
         conn.close()
 
 
-def cancel_latest_event_registration(
-    user_id: int,
-):
-
+def cancel_latest_event_registration(user_id: int):
     conn = get_db_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute(
@@ -915,7 +847,6 @@ def cancel_latest_event_registration(
         return True
 
     finally:
-
         conn.close()
 
 
@@ -924,14 +855,11 @@ def cancel_latest_event_registration(
 # =====================================================================
 
 def backup_database():
-
     if not os.path.exists(DB_PATH):
         return
 
     backup_dir = os.path.join(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        ),
+        os.path.dirname(os.path.abspath(__file__)),
         "db_backups",
     )
 
@@ -950,32 +878,21 @@ def backup_database():
     )
 
     source = get_db_connection()
-
-    destination = sqlite3.connect(
-        backup_path
-    )
+    destination = sqlite3.connect(backup_path)
 
     try:
-
-        source.backup(
-            destination
-        )
-
+        source.backup(destination)
     finally:
-
         destination.close()
         source.close()
 
     backups = sorted(
-        Path(backup_dir).glob(
-            "registrations_*.db"
-        ),
+        Path(backup_dir).glob("registrations_*.db"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
 
     for old_backup in backups[7:]:
-
         try:
             old_backup.unlink()
         except OSError:
@@ -987,7 +904,6 @@ def backup_database():
 # =====================================================================
 
 def get_main_menu_keyboard():
-
     return ReplyKeyboardMarkup(
         [
             [
@@ -1003,7 +919,6 @@ def get_main_menu_keyboard():
 
 
 def get_back_keyboard():
-
     return ReplyKeyboardMarkup(
         [
             [
@@ -1015,7 +930,6 @@ def get_back_keyboard():
 
 
 def get_profile_register_keyboard():
-
     return ReplyKeyboardMarkup(
         [
             [
@@ -1028,7 +942,6 @@ def get_profile_register_keyboard():
 
 
 def get_profile_keyboard():
-
     return ReplyKeyboardMarkup(
         [
             [
@@ -1041,7 +954,6 @@ def get_profile_keyboard():
 
 
 def get_profile_edit_keyboard():
-
     return ReplyKeyboardMarkup(
         [
             [
@@ -1064,7 +976,6 @@ def get_profile_edit_keyboard():
 
 
 def get_start_keyboard():
-
     return InlineKeyboardMarkup(
         [
             [
@@ -1078,13 +989,20 @@ def get_start_keyboard():
 
 
 def get_event_location_keyboard():
-
+    # Back is an INLINE keyboard button here.
+    # It is not sent as a separate ReplyKeyboard message.
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
                     "📍 Tashkent",
                     callback_data="Tashkent",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Tashkent Region",
+                    callback_data="Tashkent Region",
                 )
             ],
             [
@@ -1101,16 +1019,27 @@ def get_event_location_keyboard():
             ],
             [
                 InlineKeyboardButton(
+                    "📍 Andijan",
+                    callback_data="Andijan",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Fergana",
+                    callback_data="Fergana",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     "🔙 Back",
                     callback_data="event_back",
-                )
+                ),
             ],
         ]
     )
 
 
 def get_register_confirmation_keyboard():
-
     return InlineKeyboardMarkup(
         [
             [
@@ -1130,12 +1059,8 @@ def get_register_confirmation_keyboard():
 
 
 def get_registered_event_keyboard():
-
     return InlineKeyboardMarkup(
         [
-
-
-
             [
                 InlineKeyboardButton(
                     "🔙 Back",
@@ -1154,7 +1079,6 @@ def format_user_info_message(
     user_data: dict,
     telegram_user=None,
 ):
-
     name = user_data.get(
         "full_name",
         "N/A",
@@ -1170,13 +1094,9 @@ def format_user_info_message(
         "N/A",
     ) or "N/A"
 
-    # Always read username directly from Telegram.
-    username = get_telegram_username(
-        telegram_user
-    )
+    username = get_telegram_username(telegram_user)
 
     if not username:
-
         username = user_data.get(
             "telegram_username",
             "",
@@ -1207,11 +1127,10 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     context.user_data.clear()
 
     await update.message.reply_text(
-        "Welcome to ArticularUz! 🚀\n\n"
+        "Welcome to ArticularUZ! 🚀\n\n"
         "Where young innovators across Uzbekistan present, "
         "defend, and connect their scientific ideas with "
         "the global community!\n\n"
@@ -1226,7 +1145,6 @@ async def restart(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     return await start(
         update,
         context,
@@ -1241,7 +1159,6 @@ def load_user_into_context(
     user,
     context,
 ):
-
     (
         _user_id,
         db_username,
@@ -1268,15 +1185,11 @@ async def menu_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     user_id = update.effective_user.id
 
-    existing_user = get_user(
-        user_id
-    )
+    existing_user = get_user(user_id)
 
     if not existing_user:
-
         await update.message.reply_text(
             "You are not registered.\n\n"
             "Please press /start to register."
@@ -1288,10 +1201,6 @@ async def menu_command(
         existing_user,
         context,
     )
-
-    # IMPORTANT:
-    # /menu only reads SQLite.
-    # No Baserow synchronization here.
 
     await update.message.reply_text(
         "Choose an option from the menu below:",
@@ -1309,31 +1218,23 @@ async def start_button_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     query = update.callback_query
 
     await query.answer()
 
     user_id = query.from_user.id
 
-    existing_user = get_user(
-        user_id
-    )
+    existing_user = get_user(user_id)
 
     await query.edit_message_reply_markup(
         reply_markup=None
     )
 
     if existing_user:
-
         load_user_into_context(
             existing_user,
             context,
         )
-
-        # IMPORTANT:
-        # Do NOT call save_current_user().
-        # Existing users are simply loaded from SQLite.
 
         await query.message.reply_text(
             "Welcome back! 👋\n\n"
@@ -1362,11 +1263,9 @@ async def full_name(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     name = update.message.text.strip()
 
     if len(name.split()) < 2:
-
         await update.message.reply_text(
             "Please enter your full name "
             "(first and last name)."
@@ -1374,20 +1273,14 @@ async def full_name(
 
         return FULL_NAME
 
-    context.user_data[
-        "full_name"
-    ] = name
+    context.user_data["full_name"] = name
 
-    if context.user_data.get(
-        "editing_single_field"
-    ):
-
+    if context.user_data.get("editing_single_field"):
         context.user_data.pop(
             "editing_single_field",
             None,
         )
 
-        # Actual profile change -> sync Baserow.
         await save_current_user(
             update,
             context,
@@ -1423,14 +1316,12 @@ async def age(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     text = update.message.text.strip()
 
     if (
         not text.isdigit()
         or not (5 <= int(text) <= 100)
     ):
-
         await update.message.reply_text(
             "Please enter a valid age as a number "
             "(e.g. 17)."
@@ -1438,20 +1329,14 @@ async def age(
 
         return AGE
 
-    context.user_data[
-        "age"
-    ] = int(text)
+    context.user_data["age"] = int(text)
 
-    if context.user_data.get(
-        "editing_single_field"
-    ):
-
+    if context.user_data.get("editing_single_field"):
         context.user_data.pop(
             "editing_single_field",
             None,
         )
 
-        # Actual profile change -> sync Baserow.
         await save_current_user(
             update,
             context,
@@ -1501,28 +1386,18 @@ async def phone(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     phone_number = None
 
     if update.message.contact:
-
-        phone_number = (
-            update.message.contact.phone_number
-        )
+        phone_number = update.message.contact.phone_number
 
     elif update.message.text:
-
         text = update.message.text.strip()
 
-        if re.match(
-            r"^\+?\d{7,15}$",
-            text,
-        ):
-
+        if re.match(r"^\+?\d{7,15}$", text):
             phone_number = text
 
     if not phone_number:
-
         await update.message.reply_text(
             "Please use the button below or type "
             "a valid phone number "
@@ -1532,23 +1407,16 @@ async def phone(
         return PHONE
 
     if not phone_number.startswith("+"):
-
         phone_number = "+" + phone_number
 
-    context.user_data[
-        "phone"
-    ] = phone_number
+    context.user_data["phone"] = phone_number
 
-    if context.user_data.get(
-        "editing_single_field"
-    ):
-
+    if context.user_data.get("editing_single_field"):
         context.user_data.pop(
             "editing_single_field",
             None,
         )
 
-        # Actual profile change -> sync Baserow.
         await save_current_user(
             update,
             context,
@@ -1569,16 +1437,12 @@ async def phone(
 
         return EDIT_INFO_MENU
 
-    # New registration.
     username_value = get_telegram_username(
         update.effective_user
     )
 
-    context.user_data[
-        "telegram_username"
-    ] = username_value
+    context.user_data["telegram_username"] = username_value
 
-    # New registration -> sync Baserow.
     await save_current_user(
         update,
         context,
@@ -1605,16 +1469,12 @@ async def username(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     username_value = get_telegram_username(
         update.effective_user
     )
 
-    context.user_data[
-        "telegram_username"
-    ] = username_value
+    context.user_data["telegram_username"] = username_value
 
-    # Actual profile change -> sync Baserow.
     await save_current_user(
         update,
         context,
@@ -1643,7 +1503,6 @@ async def save_current_user(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     user_id = update.effective_user.id
 
     telegram_username = get_telegram_username(
@@ -1651,15 +1510,9 @@ async def save_current_user(
     )
 
     if telegram_username:
-
         username_value = telegram_username
-
-        context.user_data[
-            "telegram_username"
-        ] = username_value
-
+        context.user_data["telegram_username"] = username_value
     else:
-
         username_value = context.user_data.get(
             "telegram_username",
             "",
@@ -1685,7 +1538,6 @@ async def save_current_user(
         "",
     )
 
-    # Save locally first.
     save_user(
         user_id=user_id,
         username=username_value,
@@ -1695,8 +1547,6 @@ async def save_current_user(
         location=location,
     )
 
-    # Synchronize with Baserow only when this function
-    # is explicitly called because data changed.
     await sync_user_to_baserow(
         user_id=user_id,
         username=username_value,
@@ -1722,13 +1572,11 @@ async def profile_edit_back(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     user = get_user(
         update.effective_user.id
     )
 
     if not user:
-
         await update.message.reply_text(
             "You don't have a profile.",
             reply_markup=get_profile_register_keyboard(),
@@ -1746,10 +1594,7 @@ async def profile_edit_back(
     )
 
     if username_value:
-
-        context.user_data[
-            "telegram_username"
-        ] = username_value
+        context.user_data["telegram_username"] = username_value
 
     await update.message.reply_text(
         format_user_info_message(
@@ -1770,23 +1615,13 @@ async def menu_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     text = update.message.text.strip()
 
-    # ---------------------------------------------------------------
-    # PROFILE
-    # ---------------------------------------------------------------
-
     if text == "👤 Profile":
-
         user_id = update.effective_user.id
-
-        existing_user = get_user(
-            user_id
-        )
+        existing_user = get_user(user_id)
 
         if not existing_user:
-
             context.user_data.clear()
 
             await update.message.reply_text(
@@ -1797,29 +1632,18 @@ async def menu_handler(
 
             return FULL_NAME
 
-        # -----------------------------------------------------------
-        # IMPORTANT:
-        # Only load from SQLite.
-        # NO Baserow synchronization.
-        # -----------------------------------------------------------
-
         load_user_into_context(
             existing_user,
             context,
         )
 
-        # Read username directly from Telegram for display.
         username_value = get_telegram_username(
             update.effective_user
         )
 
         if username_value:
+            context.user_data["telegram_username"] = username_value
 
-            context.user_data[
-                "telegram_username"
-            ] = username_value
-
-        # Show profile immediately.
         await update.message.reply_text(
             format_user_info_message(
                 context.user_data,
@@ -1830,18 +1654,12 @@ async def menu_handler(
 
         return MENU_SECTION
 
-    # ---------------------------------------------------------------
-    # CHANGE PROFILE
-    # ---------------------------------------------------------------
-
     if text == "✏️ Change profile info":
-
         existing_user = get_user(
             update.effective_user.id
         )
 
         if not existing_user:
-
             await update.message.reply_text(
                 "You don't have a profile yet.",
                 reply_markup=get_profile_register_keyboard(),
@@ -1861,16 +1679,8 @@ async def menu_handler(
 
         return EDIT_INFO_MENU
 
-    # ---------------------------------------------------------------
-    # REGISTER
-    # ---------------------------------------------------------------
-
     if text == "📝 Register":
-
-        if get_user(
-            update.effective_user.id
-        ):
-
+        if get_user(update.effective_user.id):
             await update.message.reply_text(
                 "You already have a profile. ✅",
                 reply_markup=get_main_menu_keyboard(),
@@ -1888,12 +1698,9 @@ async def menu_handler(
 
         return FULL_NAME
 
-    # ---------------------------------------------------------------
-    # BACK
-    # ---------------------------------------------------------------
-
+    # This Back is only for normal ReplyKeyboard menus.
+    # The event-location Back button is an INLINE callback.
     if text == "🔙 Back":
-
         await update.message.reply_text(
             "Choose an option from the menu below:",
             reply_markup=get_main_menu_keyboard(),
@@ -1901,12 +1708,7 @@ async def menu_handler(
 
         return MENU_SECTION
 
-    # ---------------------------------------------------------------
-    # WEBSITE
-    # ---------------------------------------------------------------
-
     if text == "🌐 Our website":
-
         website_keyboard = InlineKeyboardMarkup(
             [
                 [
@@ -1919,27 +1721,18 @@ async def menu_handler(
         )
 
         image_path = os.path.join(
-            os.path.dirname(
-                os.path.abspath(__file__)
-            ),
+            os.path.dirname(os.path.abspath(__file__)),
             WEBSITE_IMAGE,
         )
 
         if os.path.exists(image_path):
-
-            with open(
-                image_path,
-                "rb",
-            ) as website_photo:
-
+            with open(image_path, "rb") as website_photo:
                 await update.message.reply_photo(
                     photo=website_photo,
                     caption="🌐 Our Website",
                     reply_markup=website_keyboard,
                 )
-
         else:
-
             await update.message.reply_text(
                 "🌐 Our Website\n\n"
                 "Please use the button below.",
@@ -1954,41 +1747,31 @@ async def menu_handler(
 
         return MENU_SECTION
 
-    # ---------------------------------------------------------------
-    # CHOOSE EVENT
-    # ---------------------------------------------------------------
-
     if text == "🎯 Choose an event":
-
         user_id = update.effective_user.id
 
-        active_registration = (
-            get_active_event_registration(
-                user_id
-            )
+        active_registration = get_active_event_registration(
+            user_id
         )
 
         if active_registration:
-
             (
                 _registration_id,
                 registered_location,
             ) = active_registration
 
-            context.user_data[
-                "location"
-            ] = registered_location
+            context.user_data["location"] = registered_location
 
+            # IMPORTANT:
+            # Back is now an inline button, not a separate
+            # ReplyKeyboard button/message.
             await update.message.reply_text(
                 "You are already registered! ✅\n\n"
-                f"📍 Event location: "
-                f"{registered_location}\n\n"
+                f"📍 Event location: {registered_location}\n\n"
                 "You cannot register for another "
-                "location while this registration "
-                "is active.",
-                reply_markup=get_back_keyboard(),
+                "location while this registration is active.",
+                reply_markup=get_registered_event_keyboard(),
             )
-
 
             return LOCATION
 
@@ -1998,10 +1781,6 @@ async def menu_handler(
         )
 
         return LOCATION
-
-    # ---------------------------------------------------------------
-    # UNKNOWN
-    # ---------------------------------------------------------------
 
     await update.message.reply_text(
         "Please select an option using "
@@ -2020,7 +1799,6 @@ async def location_chosen(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     query = update.callback_query
 
     await query.answer()
@@ -2029,17 +1807,14 @@ async def location_chosen(
     user_id = query.from_user.id
 
     if chosen not in VALID_CITIES:
-
         await query.edit_message_text(
             "Unknown location."
         )
 
         return MENU_SECTION
 
-    active_registration = (
-        get_active_event_registration(
-            user_id
-        )
+    active_registration = get_active_event_registration(
+        user_id
     )
 
     if active_registration:
@@ -2048,9 +1823,7 @@ async def location_chosen(
             registered_location,
         ) = active_registration
 
-        context.user_data[
-            "location"
-        ] = registered_location
+        context.user_data["location"] = registered_location
 
         await query.edit_message_text(
             f"📍 You are already registered in {registered_location}.",
@@ -2059,12 +1832,9 @@ async def location_chosen(
 
         return LOCATION
 
-    existing_user = get_user(
-        user_id
-    )
+    existing_user = get_user(user_id)
 
     if existing_user:
-
         load_user_into_context(
             existing_user,
             context,
@@ -2075,10 +1845,7 @@ async def location_chosen(
     )
 
     if username_value:
-
-        context.user_data[
-            "telegram_username"
-        ] = username_value
+        context.user_data["telegram_username"] = username_value
 
     required = (
         "full_name",
@@ -2090,7 +1857,6 @@ async def location_chosen(
         context.user_data.get(key)
         for key in required
     ):
-
         await query.edit_message_text(
             "Your profile is incomplete."
         )
@@ -2102,9 +1868,7 @@ async def location_chosen(
 
         return MENU_SECTION
 
-    context.user_data[
-        "selected_event_location"
-    ] = chosen
+    context.user_data["selected_event_location"] = chosen
 
     username_display = (
         context.user_data.get(
@@ -2115,14 +1879,10 @@ async def location_chosen(
 
     preview = (
         "Please confirm your registration:\n\n"
-        f"👤 Name: "
-        f"{context.user_data.get('full_name')}\n"
-        f"🎂 Age: "
-        f"{context.user_data.get('age')}\n"
-        f"📞 Phone: "
-        f"{context.user_data.get('phone')}\n"
-        f"📱 Username: "
-        f"{username_display}\n"
+        f"👤 Name: {context.user_data.get('full_name')}\n"
+        f"🎂 Age: {context.user_data.get('age')}\n"
+        f"📞 Phone: {context.user_data.get('phone')}\n"
+        f"📱 Username: {username_display}\n"
         f"📍 Location: {chosen}"
     )
 
@@ -2142,7 +1902,6 @@ async def register_event_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     query = update.callback_query
 
     await query.answer()
@@ -2154,21 +1913,17 @@ async def register_event_callback(
     )
 
     if chosen not in VALID_CITIES:
-
         await query.edit_message_text(
             "No valid event location selected."
         )
 
         return MENU_SECTION
 
-    active_registration = (
-        get_active_event_registration(
-            user_id
-        )
+    active_registration = get_active_event_registration(
+        user_id
     )
 
     if active_registration:
-
         (
             _registration_id,
             registered_location,
@@ -2181,8 +1936,7 @@ async def register_event_callback(
 
         await query.edit_message_text(
             "You are already registered! ✅\n\n"
-            f"📍 Event location: "
-            f"{registered_location}",
+            f"📍 Event location: {registered_location}",
             reply_markup=get_registered_event_keyboard(),
         )
 
@@ -2193,10 +1947,7 @@ async def register_event_callback(
     )
 
     if username_value:
-
-        context.user_data[
-            "telegram_username"
-        ] = username_value
+        context.user_data["telegram_username"] = username_value
 
     full_name_value = context.user_data.get(
         "full_name",
@@ -2213,13 +1964,7 @@ async def register_event_callback(
         "",
     )
 
-    context.user_data[
-        "location"
-    ] = chosen
-
-    # ---------------------------------------------------------------
-    # Save SQLite
-    # ---------------------------------------------------------------
+    context.user_data["location"] = chosen
 
     save_user(
         user_id=user_id,
@@ -2230,27 +1975,18 @@ async def register_event_callback(
         location=chosen,
     )
 
-    # ---------------------------------------------------------------
-    # Create event registration
-    # ---------------------------------------------------------------
-
     registration_id = create_event_registration(
         user_id,
         chosen,
     )
 
     if registration_id is None:
-
         await query.edit_message_text(
             "You are already registered for an event. "
             "Please check your current registration."
         )
 
         return MENU_SECTION
-
-    # ---------------------------------------------------------------
-    # Sync Baserow
-    # ---------------------------------------------------------------
 
     await sync_user_to_baserow(
         user_id=user_id,
@@ -2266,8 +2002,7 @@ async def register_event_callback(
         f"👤 Name: {full_name_value}\n"
         f"🎂 Age: {age_value}\n"
         f"📞 Phone: {phone_value}\n"
-        f"📱 Username: "
-        f"{username_value or 'No username'}\n"
+        f"📱 Username: {username_value or 'No username'}\n"
         f"📍 Location: {chosen}\n\n"
         f"Join the {chosen} group here:\n"
         f"{LOCATIONS[chosen]}"
@@ -2310,7 +2045,6 @@ async def cancel_event_preview_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     query = update.callback_query
 
     await query.answer()
@@ -2340,7 +2074,6 @@ async def event_back_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     query = update.callback_query
 
     await query.answer()
@@ -2350,9 +2083,14 @@ async def event_back_callback(
         None,
     )
 
-    await query.edit_message_text(
-        "Returning to the main menu..."
-    )
+    # Edit the existing event message instead of sending
+    # a separate "Back" message.
+    try:
+        await query.edit_message_text(
+            "Choose an option from the menu below:"
+        )
+    except Exception:
+        pass
 
     await query.message.reply_text(
         "Choose an option from the menu below:",
@@ -2370,7 +2108,6 @@ async def cancel_registration_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     query = update.callback_query
 
     await query.answer()
@@ -2382,7 +2119,6 @@ async def cancel_registration_callback(
     )
 
     if not cancelled:
-
         await query.edit_message_text(
             "You do not have an active event registration."
         )
@@ -2397,7 +2133,6 @@ async def cancel_registration_callback(
     conn = get_db_connection()
 
     try:
-
         conn.execute(
             """
             UPDATE users
@@ -2410,12 +2145,9 @@ async def cancel_registration_callback(
         conn.commit()
 
     finally:
-
         conn.close()
 
-    context.user_data[
-        "location"
-    ] = ""
+    context.user_data["location"] = ""
 
     context.user_data.pop(
         "selected_event_location",
@@ -2427,13 +2159,8 @@ async def cancel_registration_callback(
     )
 
     if username_value:
+        context.user_data["telegram_username"] = username_value
 
-        context.user_data[
-            "telegram_username"
-        ] = username_value
-
-    # Cancellation changes the location,
-    # so Baserow MUST be synchronized.
     await sync_user_to_baserow(
         user_id=user_id,
         username=username_value or context.user_data.get(
@@ -2476,17 +2203,13 @@ async def cancel_location_from_profile(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     user_id = update.effective_user.id
 
-    active_registration = (
-        get_active_event_registration(
-            user_id
-        )
+    active_registration = get_active_event_registration(
+        user_id
     )
 
     if not active_registration:
-
         await update.message.reply_text(
             "You are not registered for any "
             "event location. 📍",
@@ -2505,7 +2228,6 @@ async def cancel_location_from_profile(
     )
 
     if not cancelled:
-
         await update.message.reply_text(
             "Your event registration could not "
             "be cancelled.",
@@ -2517,7 +2239,6 @@ async def cancel_location_from_profile(
     conn = get_db_connection()
 
     try:
-
         conn.execute(
             """
             UPDATE users
@@ -2530,12 +2251,9 @@ async def cancel_location_from_profile(
         conn.commit()
 
     finally:
-
         conn.close()
 
-    context.user_data[
-        "location"
-    ] = ""
+    context.user_data["location"] = ""
 
     context.user_data.pop(
         "selected_event_location",
@@ -2547,13 +2265,8 @@ async def cancel_location_from_profile(
     )
 
     if username_value:
+        context.user_data["telegram_username"] = username_value
 
-        context.user_data[
-            "telegram_username"
-        ] = username_value
-
-    # Cancellation changes the location,
-    # so Baserow MUST be synchronized.
     await sync_user_to_baserow(
         user_id=user_id,
         username=username_value or context.user_data.get(
@@ -2594,10 +2307,7 @@ async def cmd_edit_name(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
-    context.user_data[
-        "editing_single_field"
-    ] = True
+    context.user_data["editing_single_field"] = True
 
     await update.message.reply_text(
         "Please enter your updated Full Name:",
@@ -2611,10 +2321,7 @@ async def cmd_edit_age(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
-    context.user_data[
-        "editing_single_field"
-    ] = True
+    context.user_data["editing_single_field"] = True
 
     await update.message.reply_text(
         "Please enter your updated Age:",
@@ -2628,10 +2335,7 @@ async def cmd_edit_phone(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
-    context.user_data[
-        "editing_single_field"
-    ] = True
+    context.user_data["editing_single_field"] = True
 
     contact_keyboard = ReplyKeyboardMarkup(
         [
@@ -2659,38 +2363,29 @@ async def cmd_edit_username(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     username_value = get_telegram_username(
         update.effective_user
     )
 
-    context.user_data[
-        "telegram_username"
-    ] = username_value
+    context.user_data["telegram_username"] = username_value
 
-    # Actual username update -> sync Baserow.
     await save_current_user(
         update,
         context,
     )
 
     if username_value:
-
         message = (
             f"Your Telegram username is {username_value}. ✅"
         )
-
     else:
-
         message = (
             "You do not currently have a Telegram username. "
             "You can set one in Telegram and then press "
             "\"4️⃣ Change Username\" again."
         )
 
-    await update.message.reply_text(
-        message
-    )
+    await update.message.reply_text(message)
 
     await update.message.reply_text(
         format_user_info_message(
@@ -2707,7 +2402,6 @@ async def profile_edit_name_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     return await cmd_edit_name(
         update,
         context,
@@ -2718,7 +2412,6 @@ async def profile_edit_age_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     return await cmd_edit_age(
         update,
         context,
@@ -2729,7 +2422,6 @@ async def profile_edit_contact_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     return await cmd_edit_phone(
         update,
         context,
@@ -2740,7 +2432,6 @@ async def profile_edit_username_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     return await cmd_edit_username(
         update,
         context,
@@ -2755,13 +2446,11 @@ async def profile_back_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     user = get_user(
         update.effective_user.id
     )
 
     if not user:
-
         await update.message.reply_text(
             "You don't have a profile.",
             reply_markup=get_main_menu_keyboard(),
@@ -2774,17 +2463,12 @@ async def profile_back_button(
         context,
     )
 
-    # Only read username for display.
-    # Do NOT save/sync here.
     username_value = get_telegram_username(
         update.effective_user
     )
 
     if username_value:
-
-        context.user_data[
-            "telegram_username"
-        ] = username_value
+        context.user_data["telegram_username"] = username_value
 
     await update.message.reply_text(
         format_user_info_message(
@@ -2805,7 +2489,6 @@ async def cancel(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-
     context.user_data.clear()
 
     await update.message.reply_text(
@@ -2824,7 +2507,6 @@ async def cancel(
 async def set_bot_commands(
     application: Application,
 ):
-
     await application.bot.set_my_commands(
         [
             (
@@ -2848,12 +2530,10 @@ async def set_bot_commands(
 # =====================================================================
 
 def main():
-
     if (
         not BOT_TOKEN
         or BOT_TOKEN == "YOUR_NEW_TELEGRAM_BOT_TOKEN"
     ):
-
         raise RuntimeError(
             "BOT_TOKEN is not configured. "
             "Set BOT_TOKEN as an environment variable."
@@ -2863,23 +2543,13 @@ def main():
         not BASEROW_TOKEN
         or BASEROW_TOKEN == "YOUR_NEW_BASEROW_TOKEN"
     ):
-
         raise RuntimeError(
             "BASEROW_TOKEN is not configured. "
             "Set BASEROW_TOKEN as an environment variable."
         )
 
-    # ---------------------------------------------------------------
-    # Database
-    # ---------------------------------------------------------------
-
     init_db()
-
     backup_database()
-
-    # ---------------------------------------------------------------
-    # Telegram application
-    # ---------------------------------------------------------------
 
     app = (
         Application.builder()
@@ -2888,12 +2558,7 @@ def main():
         .build()
     )
 
-    # ---------------------------------------------------------------
-    # Conversation handler
-    # ---------------------------------------------------------------
-
     conv_handler = ConversationHandler(
-
         entry_points=[
             CommandHandler(
                 "start",
@@ -2910,13 +2575,11 @@ def main():
         ],
 
         states={
-
             # =========================================================
             # MAIN MENU
             # =========================================================
 
             MENU_SECTION: [
-
                 CallbackQueryHandler(
                     start_button_callback,
                     pattern=r"^start_registration$",
@@ -2938,7 +2601,6 @@ def main():
             # =========================================================
 
             FULL_NAME: [
-
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     full_name,
@@ -2950,7 +2612,6 @@ def main():
             # =========================================================
 
             AGE: [
-
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     age,
@@ -2962,7 +2623,6 @@ def main():
             # =========================================================
 
             PHONE: [
-
                 MessageHandler(
                     (
                         filters.CONTACT
@@ -2978,7 +2638,6 @@ def main():
             # =========================================================
 
             USERNAME: [
-
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     username,
@@ -2990,10 +2649,10 @@ def main():
             # =========================================================
 
             LOCATION: [
-
+                # All six event locations.
                 CallbackQueryHandler(
                     location_chosen,
-                    pattern=r"^(Tashkent|Samarkand|Bukhara)$",
+                    pattern=r"^(Tashkent|Tashkent Region|Samarkand|Bukhara|Andijan|Fergana)$",
                 ),
 
                 CallbackQueryHandler(
@@ -3011,11 +2670,14 @@ def main():
                     pattern=r"^cancel_registration$",
                 ),
 
+                # Inline Back button from the event keyboard.
                 CallbackQueryHandler(
                     event_back_callback,
                     pattern=r"^event_back$",
                 ),
 
+                # Kept only for compatibility if an old ReplyKeyboard
+                # Back button is still visible on a user's device.
                 MessageHandler(
                     filters.Regex(r"^🔙 Back$"),
                     menu_handler,
@@ -3027,7 +2689,6 @@ def main():
             # =========================================================
 
             EDIT_INFO_MENU: [
-
                 MessageHandler(
                     filters.Regex(
                         r"^1️⃣ Change Name$"
@@ -3093,7 +2754,6 @@ def main():
         },
 
         fallbacks=[
-
             CommandHandler(
                 "restart",
                 restart,
@@ -3140,31 +2800,18 @@ def main():
         per_message=False,
     )
 
-    app.add_handler(
-        conv_handler
-    )
+    app.add_handler(conv_handler)
 
     logger.info(
         "Bot started. Press Ctrl+C to stop."
     )
 
-    # ---------------------------------------------------------------
-    # Python 3.14 event loop compatibility
-    # ---------------------------------------------------------------
-
     try:
-
         asyncio.get_event_loop()
-
     except RuntimeError:
-
         asyncio.set_event_loop(
             asyncio.new_event_loop()
         )
-
-    # ---------------------------------------------------------------
-    # Start bot
-    # ---------------------------------------------------------------
 
     app.run_polling(
         drop_pending_updates=True
