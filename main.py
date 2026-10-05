@@ -7,6 +7,7 @@ import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -178,25 +179,88 @@ def get_telegram_username(user) -> str:
 
 
 # =====================================================================
-# BASEROW: FIND ROWS
+# BASEROW HELPERS
 # =====================================================================
 
-def _get_baserow_rows_sync(
-    table_name: str,
-    user_id: int,
-):
-    table_id = BASEROW_TABLE_IDS[table_name]
+BASEROW_API_BASE = "https://api.baserow.io/api/database/rows/table"
 
+
+def _baserow_url(table_name: str, row_id: int | None = None) -> str:
+    table_id = BASEROW_TABLE_IDS[table_name]
+    if row_id is None:
+        return f"{BASEROW_API_BASE}/{table_id}/?user_field_names=true"
+    return f"{BASEROW_API_BASE}/{table_id}/{row_id}/?user_field_names=true"
+
+
+def _baserow_headers():
+    return {
+        "Authorization": f"Token {BASEROW_TOKEN}",
+        "Content-Type": "application/json",
+        "User-Agent": "ArticularUzBot/1.0",
+        "Accept": "application/json",
+    }
+
+
+def _baserow_payload(
+    user_id: int,
+    username: str,
+    full_name: str,
+    age: int,
+    phone: str,
+    location: str,
+    registered_at: str | None = None,
+):
+    payload = {
+        "Full Name": full_name,
+        "Age": age,
+        "Phone": phone,
+        "Telegram Username": username,
+        "Telegram ID": user_id,
+        "Event Location": location,
+    }
+
+    if registered_at:
+        payload["Registered At"] = registered_at
+
+    return payload
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# =====================================================================
+# TELEGRAM USERNAME
+# =====================================================================
+
+def get_telegram_username(user) -> str:
+    """Always get the current Telegram username directly from Telegram."""
+    if not user:
+        return ""
+    if user.username:
+        return f"@{user.username}"
+    return ""
+
+
+# =====================================================================
+# BASEROW: FIND ONE USER ROW
+# =====================================================================
+
+def _get_baserow_rows_sync(table_name: str, user_id: int):
+    """
+    Find this user's rows in one specific table.
+
+    IMPORTANT: This function intentionally checks only the table supplied.
+    We no longer scan every city table for every profile change.
+    """
     query = urllib.parse.urlencode({
         "user_field_names": "true",
-        "size": "100",
+        "size": "1",
         "filter__Telegram ID__equal": str(user_id),
     })
 
-    url = (
-        "https://api.baserow.io/api/database/rows/table/"
-        f"{table_id}/?{query}"
-    )
+    table_id = BASEROW_TABLE_IDS[table_name]
+    url = f"{BASEROW_API_BASE}/{table_id}/?{query}"
 
     request = urllib.request.Request(
         url,
@@ -204,83 +268,10 @@ def _get_baserow_rows_sync(
         headers=_baserow_headers(),
     )
 
-    with urllib.request.urlopen(
-        request,
-        timeout=15,
-    ) as response:
+    with urllib.request.urlopen(request, timeout=10) as response:
         data = json.loads(response.read().decode("utf-8"))
 
     return data.get("results", [])
-
-
-# =====================================================================
-# BASEROW: DELETE USER FROM CITY TABLES
-# =====================================================================
-
-def _remove_user_from_city_tables_sync(user_id: int):
-    if not BASEROW_TOKEN:
-        return
-
-    for city in VALID_CITIES:
-        try:
-            rows = _get_baserow_rows_sync(city, user_id)
-            table_id = BASEROW_TABLE_IDS[city]
-
-            for row in rows:
-                row_id = row["id"]
-
-                delete_url = (
-                    "https://api.baserow.io/api/database/rows/table/"
-                    f"{table_id}/{row_id}/"
-                )
-
-                delete_request = urllib.request.Request(
-                    delete_url,
-                    method="DELETE",
-                    headers=_baserow_headers(),
-                )
-
-                with urllib.request.urlopen(
-                    delete_request,
-                    timeout=15,
-                ) as response:
-                    if not (200 <= response.status < 300):
-                        raise RuntimeError(
-                            f"Failed deleting row {row_id} "
-                            f"from {city}: HTTP {response.status}"
-                        )
-
-                logger.info(
-                    "Removed Telegram ID %s from %s",
-                    user_id,
-                    city,
-                )
-
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
-
-            logger.error(
-                "Baserow delete error in %s: HTTP %s: %s",
-                city,
-                exc.code,
-                body,
-            )
-
-        except Exception:
-            logger.exception(
-                "Unexpected error removing user from %s",
-                city,
-            )
-
-
-async def remove_user_from_city_tables(user_id: int):
-    await asyncio.to_thread(
-        _remove_user_from_city_tables_sync,
-        user_id,
-    )
 
 
 # =====================================================================
@@ -296,16 +287,11 @@ def _sync_users_table_sync(
     location: str,
 ):
     table_id = BASEROW_TABLE_IDS["Users"]
-
-    rows = _get_baserow_rows_sync(
-        "Users",
-        user_id,
-    )
+    rows = _get_baserow_rows_sync("Users", user_id)
 
     if rows:
         row = rows[0]
         row_id = row["id"]
-
         payload = _baserow_payload(
             user_id=user_id,
             username=username,
@@ -313,86 +299,52 @@ def _sync_users_table_sync(
             age=age,
             phone=phone,
             location=location,
-        )
-
-        existing_registered_at = row.get("Registered At")
-
-        if existing_registered_at:
-            payload["Registered At"] = existing_registered_at
-        else:
-            payload["Registered At"] = _utc_now()
-
-        update_url = (
-            "https://api.baserow.io/api/database/rows/table/"
-            f"{table_id}/{row_id}/"
-            "?user_field_names=true"
+            registered_at=row.get("Registered At") or _utc_now(),
         )
 
         request = urllib.request.Request(
-            update_url,
+            _baserow_url("Users", row_id),
             data=json.dumps(payload).encode("utf-8"),
             method="PATCH",
             headers=_baserow_headers(),
         )
 
-        with urllib.request.urlopen(
-            request,
-            timeout=15,
-        ) as response:
-            if not (200 <= response.status < 300):
-                raise RuntimeError(
-                    f"Users update failed: HTTP {response.status}"
-                )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(f"Users update failed: HTTP {response.status}")
 
-        logger.info(
-            "Updated Users row %s for Telegram ID %s",
-            row_id,
-            user_id,
-        )
+        logger.info("Updated Users row %s for Telegram ID %s", row_id, user_id)
+        return
 
-    else:
-        payload = _baserow_payload(
-            user_id=user_id,
-            username=username,
-            full_name=full_name,
-            age=age,
-            phone=phone,
-            location=location,
-            registered_at=_utc_now(),
-        )
+    payload = _baserow_payload(
+        user_id=user_id,
+        username=username,
+        full_name=full_name,
+        age=age,
+        phone=phone,
+        location=location,
+        registered_at=_utc_now(),
+    )
 
-        create_url = (
-            "https://api.baserow.io/api/database/rows/table/"
-            f"{table_id}/?user_field_names=true"
-        )
+    request = urllib.request.Request(
+        _baserow_url("Users"),
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers=_baserow_headers(),
+    )
 
-        request = urllib.request.Request(
-            create_url,
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-            headers=_baserow_headers(),
-        )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"Users creation failed: HTTP {response.status}")
 
-        with urllib.request.urlopen(
-            request,
-            timeout=15,
-        ) as response:
-            if not (200 <= response.status < 300):
-                raise RuntimeError(
-                    f"Users creation failed: HTTP {response.status}"
-                )
-
-        logger.info(
-            "Created Users row for Telegram ID %s",
-            user_id,
-        )
+    logger.info("Created Users row for Telegram ID %s", user_id)
 
 
 # =====================================================================
-# BASEROW: ADD USER TO CITY
+# BASEROW: UPDATE ONE CITY ROW
 # =====================================================================
 
-def _add_user_to_city_sync(
+def _sync_city_row_sync(
     city: str,
     user_id: int,
     username: str,
@@ -400,22 +352,43 @@ def _add_user_to_city_sync(
     age: int,
     phone: str,
 ):
+    """
+    Update/create the user in the KNOWN city table only.
+
+    The old implementation searched all six city tables and then deleted
+    rows before adding the user again. That was the main source of delay.
+    """
     if city not in VALID_CITIES:
         return
 
-    table_id = BASEROW_TABLE_IDS[city]
+    rows = _get_baserow_rows_sync(city, user_id)
 
-    existing_rows = _get_baserow_rows_sync(
-        city,
-        user_id,
-    )
-
-    if existing_rows:
-        logger.info(
-            "Telegram ID %s already exists in %s",
-            user_id,
-            city,
+    if rows:
+        row = rows[0]
+        payload = _baserow_payload(
+            user_id=user_id,
+            username=username,
+            full_name=full_name,
+            age=age,
+            phone=phone,
+            location=city,
+            registered_at=row.get("Registered At") or _utc_now(),
         )
+
+        request = urllib.request.Request(
+            _baserow_url(city, row["id"]),
+            data=json.dumps(payload).encode("utf-8"),
+            method="PATCH",
+            headers=_baserow_headers(),
+        )
+
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(
+                    f"{city} update failed: HTTP {response.status}"
+                )
+
+        logger.info("Updated Telegram ID %s in %s", user_id, city)
         return
 
     payload = _baserow_payload(
@@ -428,36 +401,77 @@ def _add_user_to_city_sync(
         registered_at=_utc_now(),
     )
 
-    create_url = (
-        "https://api.baserow.io/api/database/rows/table/"
-        f"{table_id}/?user_field_names=true"
-    )
-
     request = urllib.request.Request(
-        create_url,
+        _baserow_url(city),
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
         headers=_baserow_headers(),
     )
 
-    with urllib.request.urlopen(
-        request,
-        timeout=15,
-    ) as response:
-        if not (200 <= response.status < 300):
-            raise RuntimeError(
-                f"{city} creation failed: HTTP {response.status}"
-            )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"{city} creation failed: HTTP {response.status}")
 
-    logger.info(
-        "Added Telegram ID %s to %s",
-        user_id,
-        city,
-    )
+    logger.info("Added Telegram ID %s to %s", user_id, city)
 
 
 # =====================================================================
-# BASEROW: FULL SYNC
+# BASEROW: DELETE FROM ONE KNOWN CITY
+# =====================================================================
+
+def _delete_user_from_city_sync(city: str, user_id: int):
+    """Delete the user from one known city table only."""
+    if city not in VALID_CITIES:
+        return
+
+    rows = _get_baserow_rows_sync(city, user_id)
+    table_id = BASEROW_TABLE_IDS[city]
+
+    for row in rows:
+        request = urllib.request.Request(
+            f"{BASEROW_API_BASE}/{table_id}/{row['id']}/",
+            method="DELETE",
+            headers=_baserow_headers(),
+        )
+
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if not 200 <= response.status < 300:
+                raise RuntimeError(
+                    f"Failed deleting row {row['id']} from {city}: HTTP {response.status}"
+                )
+
+        logger.info("Removed Telegram ID %s from %s", user_id, city)
+
+
+# =====================================================================
+# BASEROW: LEGACY FULL CITY CLEANUP
+# =====================================================================
+
+async def remove_user_from_city_tables(user_id: int, known_city: str | None = None):
+    """
+    Fast path: if the city is known, delete only from that city.
+
+    The all-city fallback is kept for compatibility, but normal bot actions
+    should always provide known_city so only one Baserow table is queried.
+    """
+    if known_city in VALID_CITIES:
+        await asyncio.to_thread(
+            _delete_user_from_city_sync,
+            known_city,
+            user_id,
+        )
+        return
+
+    # Fallback only for old/unrecoverable data where the location is unknown.
+    # Run the six lookups concurrently instead of sequentially.
+    await asyncio.gather(*[
+        asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
+        for city in VALID_CITIES
+    ], return_exceptions=True)
+
+
+# =====================================================================
+# BASEROW: FAST USER SYNCHRONIZATION
 # =====================================================================
 
 def _sync_user_to_baserow_sync(
@@ -468,14 +482,26 @@ def _sync_user_to_baserow_sync(
     phone: str,
     location: str,
 ):
+    """
+    Synchronize Users + the known city in parallel.
+
+    Before:
+        Users lookup/update
+        + six city lookups
+        + possible deletes
+        + city lookup/create
+
+    Now:
+        Users lookup/update
+        + one known-city lookup/update
+
+    The two operations are executed concurrently.
+    """
     if not BASEROW_TOKEN:
-        logger.warning(
-            "BASEROW_TOKEN is not configured."
-        )
+        logger.warning("BASEROW_TOKEN is not configured.")
         return
 
-    try:
-        # 1. Users table
+    def sync_users():
         _sync_users_table_sync(
             user_id=user_id,
             username=username,
@@ -485,12 +511,9 @@ def _sync_user_to_baserow_sync(
             location=location,
         )
 
-        # 2. Remove old city rows
-        _remove_user_from_city_tables_sync(user_id)
-
-        # 3. Add user to selected city
+    def sync_city():
         if location in VALID_CITIES:
-            _add_user_to_city_sync(
+            _sync_city_row_sync(
                 city=location,
                 user_id=user_id,
                 username=username,
@@ -499,32 +522,29 @@ def _sync_user_to_baserow_sync(
                 phone=phone,
             )
 
+    try:
+        # Users and city are independent Baserow requests, so run them together.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            users_future = executor.submit(sync_users)
+            city_future = executor.submit(sync_city)
+
+            users_future.result()
+            city_future.result()
+
+        logger.info(
+            "Fast Baserow sync completed for Telegram ID %s",
+            user_id,
+        )
+
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode(
-            "utf-8",
-            errors="replace",
-        )
+        body = exc.read().decode("utf-8", errors="replace")
+        logger.error("Baserow HTTP error %s: %s", exc.code, body)
 
-        logger.error(
-            "Baserow HTTP error %s: %s",
-            exc.code,
-            body,
-        )
-
-    except (
-        urllib.error.URLError,
-        TimeoutError,
-        OSError,
-    ) as exc:
-        logger.error(
-            "Baserow connection error: %s",
-            exc,
-        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.error("Baserow connection error: %s", exc)
 
     except Exception:
-        logger.exception(
-            "Unexpected Baserow synchronization error"
-        )
+        logger.exception("Unexpected Baserow synchronization error")
 
 
 async def sync_user_to_baserow(
@@ -547,6 +567,62 @@ async def sync_user_to_baserow(
 
 
 # =====================================================================
+# BASEROW: FAST CANCELLATION SYNC
+# =====================================================================
+
+async def cancel_user_in_baserow(
+    user_id: int,
+    username: str,
+    full_name: str,
+    age: int,
+    phone: str,
+    registered_city: str,
+):
+    """
+    Cancel registration in Baserow without scanning every city.
+
+    Users row is cleared and the user's row is deleted from the exact city
+    where the local database says they were registered.
+    """
+    if not BASEROW_TOKEN:
+        return
+
+    def clear_users():
+        _sync_users_table_sync(
+            user_id=user_id,
+            username=username,
+            full_name=full_name,
+            age=age,
+            phone=phone,
+            location="",
+        )
+
+    def delete_city():
+        if registered_city in VALID_CITIES:
+            _delete_user_from_city_sync(
+                registered_city,
+                user_id,
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            users_future = executor.submit(clear_users)
+            city_future = executor.submit(delete_city)
+            users_future.result()
+            city_future.result()
+
+        logger.info(
+            "Fast Baserow cancellation completed for Telegram ID %s from %s",
+            user_id,
+            registered_city,
+        )
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        logger.error("Baserow cancellation HTTP error %s: %s", exc.code, body)
+    except Exception:
+        logger.exception("Unexpected Baserow cancellation error")
+
+
 # SQLITE DATABASE
 # =====================================================================
 
@@ -2165,7 +2241,7 @@ async def cancel_registration_callback(
     if username_value:
         context.user_data["telegram_username"] = username_value
 
-    await sync_user_to_baserow(
+    await cancel_user_in_baserow(
         user_id=user_id,
         username=username_value or context.user_data.get(
             "telegram_username",
@@ -2183,7 +2259,7 @@ async def cancel_registration_callback(
             "phone",
             "",
         ),
-        location="",
+        registered_city=registered_location,
     )
 
     await query.edit_message_text(
