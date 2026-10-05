@@ -1029,12 +1029,6 @@ def get_event_location_keyboard():
                     callback_data="Fergana",
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="event_back",
-                ),
-            ],
         ]
     )
 
@@ -1047,26 +1041,36 @@ def get_register_confirmation_keyboard():
                     "✅ Register",
                     callback_data="register_event",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Cancel",
-                    callback_data="cancel_event_preview",
-                )
-            ],
+            ]
         ]
     )
 
 
 def get_registered_event_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton("🔙 Back")
+            ]
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_join_group_keyboard(location):
+    group_link = LOCATIONS.get(
+        location,
+        "https://t.me/your_articular_group",
+    )
+
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "🔙 Back",
-                    callback_data="event_back",
+                    "🔗 Join group",
+                    url=group_link,
                 )
-            ],
+            ]
         ]
     )
 
@@ -1780,6 +1784,10 @@ async def menu_handler(
             reply_markup=get_event_location_keyboard(),
         )
 
+        await update.message.reply_text(
+            "Use the button below to go back.",
+            reply_markup=get_back_keyboard(),
+        )
         return LOCATION
 
     await update.message.reply_text(
@@ -1826,7 +1834,11 @@ async def location_chosen(
         context.user_data["location"] = registered_location
 
         await query.edit_message_text(
-            f"📍 You are already registered in {registered_location}.",
+            f"📍 You are already registered in {registered_location}."
+        )
+
+        await query.message.reply_text(
+            "Use the button below to go back.",
             reply_markup=get_registered_event_keyboard(),
         )
 
@@ -1936,7 +1948,11 @@ async def register_event_callback(
 
         await query.edit_message_text(
             "You are already registered! ✅\n\n"
-            f"📍 Event location: {registered_location}",
+            f"📍 Event location: {registered_location}"
+        )
+
+        await query.message.reply_text(
+            "Use the button below to go back.",
             reply_markup=get_registered_event_keyboard(),
         )
 
@@ -2004,24 +2020,12 @@ async def register_event_callback(
         f"📞 Phone: {phone_value}\n"
         f"📱 Username: {username_value or 'No username'}\n"
         f"📍 Location: {chosen}\n\n"
-        f"Join the {chosen} group here:\n"
-        f"{LOCATIONS[chosen]}"
-    )
-
-    cancel_keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "❌ Cancel Registration",
-                    callback_data="cancel_registration",
-                )
-            ]
-        ]
+        f"Press the button below to join the {chosen} group."
     )
 
     await query.edit_message_text(
         summary,
-        reply_markup=cancel_keyboard,
+        reply_markup=get_join_group_keyboard(chosen),
     )
 
     context.user_data.pop(
