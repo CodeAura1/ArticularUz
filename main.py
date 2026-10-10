@@ -73,12 +73,12 @@ BASEROW_TABLE_IDS = {
 # =====================================================================
 
 LOCATIONS = {
-    "Tashkent": "https://t.me/+your_tashkent_group_invite",
+    "Tashkent": "https://t.me/articularuztoshkent",
     "Tashkent Region": "https://t.me/+your_tashkent_region_group_invite",
     "Samarkand": "https://t.me/+your_samarkand_group_invite",
-    "Bukhara": "https://t.me/+your_bukhara_group_invite",
-    "Andijan": "https://t.me/+your_andijan_group_invite",
-    "Fergana": "https://t.me/+your_fergana_group_invite",
+    "Bukhara": "https://t.me/articularuzbuxoro",
+    "Andijan": "https://t.me/articularuzandijon",
+    "Fergana": "https://t.me/articularuzfargona",
 }
 
 VALID_CITIES = (
@@ -1203,6 +1203,7 @@ def format_user_info_message(
 # START
 # =====================================================================
 
+
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1211,14 +1212,12 @@ async def start(
 
     await update.message.reply_text(
         "Welcome to ArticularUZ! 🚀\n\n"
-        "Where young innovators across Uzbekistan present, "
-        "defend, and connect their scientific ideas with "
-        "the global community!\n\n"
         "Press Start to continue.",
         reply_markup=get_start_keyboard(),
     )
 
     return MENU_SECTION
+
 
 
 async def restart(
@@ -2193,6 +2192,15 @@ async def cancel_registration_callback(
     await query.answer()
 
     user_id = query.from_user.id
+
+    # Get the registered city BEFORE cancelling the registration.
+    active_registration = get_active_event_registration(user_id)
+
+    registered_location = (
+        active_registration[1]
+        if active_registration
+        else context.user_data.get("location", "")
+    )
 
     cancelled = cancel_latest_event_registration(
         user_id
