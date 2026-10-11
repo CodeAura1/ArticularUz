@@ -982,13 +982,8 @@ def backup_database():
 def get_main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [
-                KeyboardButton("👤 Profile")
-            ],
-            [
-                KeyboardButton("🎯 Choose an event"),
-                KeyboardButton("🌐 Our website"),
-            ],
+            [KeyboardButton("👤 Profile")],
+            [KeyboardButton("🎯 Choose an event")],
         ],
         resize_keyboard=True,
     )
@@ -1133,6 +1128,7 @@ def get_registered_event_keyboard():
     )
 
 
+
 def get_join_group_keyboard(location):
     group_link = LOCATIONS.get(
         location,
@@ -1146,9 +1142,16 @@ def get_join_group_keyboard(location):
                     "🔗 Join group",
                     url=group_link,
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel registration",
+                    callback_data="cancel_registration",
+                )
+            ],
         ]
     )
+
 
 
 # =====================================================================
@@ -1787,44 +1790,7 @@ async def menu_handler(
 
         return MENU_SECTION
 
-    if text == "🌐 Our website":
-        website_keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "🌐 Visit our website",
-                        url=WEBSITE_URL,
-                    )
-                ]
-            ]
-        )
 
-        image_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            WEBSITE_IMAGE,
-        )
-
-        if os.path.exists(image_path):
-            with open(image_path, "rb") as website_photo:
-                await update.message.reply_photo(
-                    photo=website_photo,
-                    caption="🌐 Our Website",
-                    reply_markup=website_keyboard,
-                )
-        else:
-            await update.message.reply_text(
-                "🌐 Our Website\n\n"
-                "Please use the button below.",
-                reply_markup=website_keyboard,
-            )
-
-        await update.message.reply_text(
-            "Use the button below to return "
-            "to the main menu.",
-            reply_markup=get_back_keyboard(),
-        )
-
-        return MENU_SECTION
 
     if text == "🎯 Choose an event":
         user_id = update.effective_user.id
@@ -2275,10 +2241,7 @@ async def cancel_registration_callback(
         "Your profile is still saved. ✅"
     )
 
-    await query.message.reply_text(
-        "Choose an option from the menu below:",
-        reply_markup=get_main_menu_keyboard(),
-    )
+
 
     return MENU_SECTION
 
@@ -2906,9 +2869,11 @@ def main():
     )
 
 
+
 # =====================================================================
 # RUN
 # =====================================================================
 
 if __name__ == "__main__":
     main()
+
