@@ -26,6 +26,8 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
+    ApplicationHandlerStop,
     filters,
 )
 
@@ -49,6 +51,10 @@ if not BASEROW_TOKEN:
 
 WEBSITE_URL = "https://articular.uz"
 WEBSITE_IMAGE = "LOGO ARTICULARUZ (2).png"
+
+# The bot must be an administrator of this channel to reliably check membership.
+SUBSCRIPTION_CHANNEL = "@articularuz"
+SUBSCRIPTION_CHANNEL_URL = "https://t.me/articularuz"
 
 
 # =====================================================================
@@ -990,11 +996,12 @@ def get_main_menu_keyboard():
 
 
 def get_back_keyboard():
+    # Used on the Choose an event screen: cancellation belongs here,
+    # not in the profile-edit menu.
     return ReplyKeyboardMarkup(
         [
-            [
-                KeyboardButton("🔙 Back")
-            ]
+            [KeyboardButton("🔙 Back")],
+            [KeyboardButton("❌ Cancel Location")],
         ],
         resize_keyboard=True,
     )
@@ -1036,9 +1043,6 @@ def get_profile_edit_keyboard():
                 KeyboardButton("4️⃣ Change Username"),
             ],
             [
-                KeyboardButton("❌ Cancel Location"),
-            ],
-            [
                 KeyboardButton("🔙 Back"),
             ],
         ],
@@ -1048,15 +1052,45 @@ def get_profile_edit_keyboard():
 
 def get_start_keyboard():
     return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("▶️ Start", callback_data="start_registration")]]
+    )
+
+
+def get_subscription_keyboard():
+    return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton(
-                    "▶️ Start",
-                    callback_data="start_registration",
-                )
-            ]
+            [InlineKeyboardButton("📢 Join our channel", url=SUBSCRIPTION_CHANNEL_URL)],
+            [InlineKeyboardButton("✅ Check subscription", callback_data="check_subscription")],
         ]
     )
+
+
+async def is_subscribed(bot, user_id: int) -> bool:
+    """Check current channel membership through Telegram; no local database is used."""
+    try:
+        member = await bot.get_chat_member(chat_id=SUBSCRIPTION_CHANNEL, user_id=user_id)
+        return member.status in ("creator", "administrator", "member") or (
+            member.status == "restricted" and bool(getattr(member, "is_member", False))
+        )
+    except Exception:
+        logger.exception(
+            "Could not check subscription for Telegram ID %s. Ensure the bot is an admin of %s.",
+            user_id,
+            SUBSCRIPTION_CHANNEL,
+        )
+        return False
+
+
+async def send_subscription_prompt(message, *, edit=False):
+    text = (
+        "Welcome to ArticularUz! 🚀\n\n"
+        "Please subscribe to our Telegram channel to use the bot.\n"
+        "After subscribing, press ‘Check subscription’."
+    )
+    if edit:
+        await message.edit_text(text, reply_markup=get_subscription_keyboard())
+    else:
+        await message.reply_text(text, reply_markup=get_subscription_keyboard())
 
 
 def get_event_location_keyboard():
@@ -1118,11 +1152,12 @@ def get_register_confirmation_keyboard():
 
 
 def get_registered_event_keyboard():
+    # Show both actions when a user already has an active event registration.
+    # The cancellation handler is registered in the LOCATION conversation state.
     return ReplyKeyboardMarkup(
         [
-            [
-                KeyboardButton("🔙 Back")
-            ]
+            [KeyboardButton("❌ Cancel Location")],
+            [KeyboardButton("🔙 Back")],
         ],
         resize_keyboard=True,
     )
@@ -1212,25 +1247,116 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     context.user_data.clear()
+    user_id = update.effective_user.id
 
-    await update.message.reply_text(
-        "Welcome to ArticularUZ! 🚀\n\n"
-        "Press Start to continue.",
+    if not await is_subscribed(context.bot, user_id):
+        await send_subscription_prompt(update.effective_message)
+        return MENU_SECTION
+
+    existing_user = get_user(user_id)
+    if existing_user:
+        load_user_into_context(existing_user, context)
+        await update.effective_message.reply_text(
+            "Welcome back to ArticularUz! 👋\n\n"
+            "Choose an option from the menu below:",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return MENU_SECTION
+
+    await update.effective_message.reply_text(
+        "Welcome to ArticularUz! 🚀\n\n"
+        "You're subscribed! Press Start to continue.",
         reply_markup=get_start_keyboard(),
     )
-
     return MENU_SECTION
-
 
 
 async def restart(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-    return await start(
-        update,
-        context,
+    context.user_data.clear()
+    user_id = update.effective_user.id
+
+    if not await is_subscribed(context.bot, user_id):
+        await send_subscription_prompt(update.effective_message)
+        return MENU_SECTION
+
+    existing_user = get_user(user_id)
+    if existing_user:
+        load_user_into_context(existing_user, context)
+        await update.effective_message.reply_text(
+            "Welcome back to ArticularUz! 👋\n\n"
+            "Choose an option from the menu below:",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return MENU_SECTION
+
+    await update.effective_message.reply_text(
+        "Welcome to ArticularUz! 🚀\n\n"
+        "You're subscribed! Press Start to continue.",
+        reply_markup=get_start_keyboard(),
     )
+    return MENU_SECTION
+
+
+async def check_subscription_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not await is_subscribed(context.bot, user_id):
+        await query.answer(
+            "I couldn't confirm your subscription. Join the channel first, then try again.",
+            show_alert=True,
+        )
+        return MENU_SECTION
+
+    await query.answer("Subscription confirmed!")
+
+    # Look in SQLite first, then Baserow. Railway deployments can have a fresh
+    # local SQLite file while the user's existing registration is still in Baserow.
+    context.user_data.clear()
+    existing_user = get_user(user_id)
+    if not existing_user:
+        try:
+            rows = await asyncio.to_thread(_get_baserow_rows_sync, "Users", user_id)
+            if rows:
+                row = rows[0]
+                existing_user = (
+                    user_id,
+                    (row.get("Telegram Username") or "").lstrip("@"),
+                    row.get("Full Name") or "",
+                    row.get("Age"),
+                    row.get("Phone") or "",
+                    row.get("Event Location") or "",
+                )
+        except Exception:
+            logger.exception("Could not check Baserow for existing user %s", user_id)
+
+    if existing_user:
+        load_user_into_context(existing_user, context)
+        await query.edit_message_text(
+            "Welcome back to ArticularUz! 👋\n\n"
+            "Subscription confirmed!"
+        )
+        await query.message.reply_text(
+            "Choose an option from the menu below:",
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return MENU_SECTION
+
+    await query.edit_message_text(
+        "Welcome to ArticularUz! 🚀\n\n"
+        "Subscription confirmed! Let's get you registered. 📝"
+    )
+    await query.message.reply_text(
+        "What's your full name?",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return FULL_NAME
 
 
 # =====================================================================
@@ -1269,6 +1395,10 @@ async def menu_command(
 ) -> int:
     user_id = update.effective_user.id
 
+    if not await is_subscribed(context.bot, user_id):
+        await send_subscription_prompt(update.effective_message)
+        return MENU_SECTION
+
     existing_user = get_user(user_id)
 
     if not existing_user:
@@ -1305,6 +1435,14 @@ async def start_button_callback(
     await query.answer()
 
     user_id = query.from_user.id
+
+    if not await is_subscribed(context.bot, user_id):
+        await query.edit_message_text(
+            "Welcome to ArticularUz! 🚀\n\n"
+            "Please subscribe to our Telegram channel to use the bot.",
+            reply_markup=get_subscription_keyboard(),
+        )
+        return MENU_SECTION
 
     existing_user = get_user(user_id)
 
@@ -1703,16 +1841,45 @@ async def menu_handler(
         user_id = update.effective_user.id
         existing_user = get_user(user_id)
 
+        # Railway may have a fresh local SQLite database while this user's
+        # profile still exists in Baserow. Check Baserow before treating them
+        # as a new user and starting registration again.
+        if not existing_user:
+            try:
+                rows = await asyncio.to_thread(_get_baserow_rows_sync, "Users", user_id)
+                if rows:
+                    row = rows[0]
+                    existing_user = (
+                        user_id,
+                        (row.get("Telegram Username") or "").lstrip("@"),
+                        row.get("Full Name") or "",
+                        row.get("Age"),
+                        row.get("Phone") or "",
+                        row.get("Event Location") or "",
+                    )
+                    # Rehydrate local SQLite so later menu actions find them too.
+                    try:
+                        save_user(
+                            user_id=user_id,
+                            username=existing_user[1],
+                            full_name=existing_user[2],
+                            age=existing_user[3],
+                            phone=existing_user[4],
+                            location=existing_user[5],
+                        )
+                    except Exception:
+                        logger.exception("Could not cache Baserow profile for %s", user_id)
+            except Exception:
+                logger.exception("Could not look up profile in Baserow for %s", user_id)
+
         if not existing_user:
             context.user_data.clear()
-
             await update.message.reply_text(
-                "Let's get you registered. 📝\n\n"
-                "What's your full name?",
-                reply_markup=ReplyKeyboardRemove(),
+                "You don't have a profile yet. Please complete registration first.\n\n"
+                "Use /start to begin registration.",
+                reply_markup=get_profile_register_keyboard(),
             )
-
-            return FULL_NAME
+            return MENU_SECTION
 
         load_user_into_context(
             existing_user,
@@ -2264,10 +2431,10 @@ async def cancel_location_from_profile(
         await update.message.reply_text(
             "You are not registered for any "
             "event location. 📍",
-            reply_markup=get_profile_edit_keyboard(),
+            reply_markup=get_back_keyboard(),
         )
 
-        return EDIT_INFO_MENU
+        return LOCATION
 
     (
         _registration_id,
@@ -2282,10 +2449,10 @@ async def cancel_location_from_profile(
         await update.message.reply_text(
             "Your event registration could not "
             "be cancelled.",
-            reply_markup=get_profile_edit_keyboard(),
+            reply_markup=get_back_keyboard(),
         )
 
-        return EDIT_INFO_MENU
+        return LOCATION
 
     conn = get_db_connection()
 
@@ -2344,10 +2511,10 @@ async def cancel_location_from_profile(
         "registration has been cancelled. ❌\n\n"
         "Your profile information is still saved. ✅\n"
         "You can register for another location anytime.",
-        reply_markup=get_profile_edit_keyboard(),
+        reply_markup=get_back_keyboard(),
     )
 
-    return EDIT_INFO_MENU
+    return LOCATION
 
 
 # =====================================================================
@@ -2577,6 +2744,33 @@ async def set_bot_commands(
 
 
 # =====================================================================
+# GLOBAL SUBSCRIPTION GUARD
+# =====================================================================
+
+async def subscription_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Require current channel membership before using any bot feature."""
+    user = update.effective_user
+    if not user:
+        return
+
+    # Let these handlers run their own subscription flow / allow the user to retry.
+    message = update.effective_message
+    if message and message.text and message.text.split()[0].split("@")[0] in ("/start", "/restart", "/menu"):
+        return
+    if update.callback_query and update.callback_query.data == "check_subscription":
+        return
+
+    if not await is_subscribed(context.bot, user.id):
+        if update.callback_query:
+            await update.callback_query.answer(
+                "Please subscribe to our channel to continue.", show_alert=True
+            )
+        if message:
+            await send_subscription_prompt(message)
+        raise ApplicationHandlerStop
+
+
+# =====================================================================
 # MAIN
 # =====================================================================
 
@@ -2727,6 +2921,11 @@ def main():
                     pattern=r"^event_back$",
                 ),
 
+                MessageHandler(
+                    filters.Regex(r"^❌ Cancel Location$"),
+                    cancel_location_from_profile,
+                ),
+
                 # Kept only for compatibility if an old ReplyKeyboard
                 # Back button is still visible on a user's device.
                 MessageHandler(
@@ -2766,13 +2965,6 @@ def main():
                         r"^4️⃣ Change Username$"
                     ),
                     profile_edit_username_button,
-                ),
-
-                MessageHandler(
-                    filters.Regex(
-                        r"^❌ Cancel Location$"
-                    ),
-                    cancel_location_from_profile,
                 ),
 
                 MessageHandler(
@@ -2851,6 +3043,16 @@ def main():
         per_message=False,
     )
 
+    # Gate all bot interactions when the user has left the required channel.
+    app.add_handler(TypeHandler(Update, subscription_guard), group=-1)
+
+    # Handle the subscription-check button globally, including before registration.
+    app.add_handler(
+        CallbackQueryHandler(
+            check_subscription_callback,
+            pattern=r"^check_subscription$",
+        )
+    )
     app.add_handler(conv_handler)
 
     logger.info(
