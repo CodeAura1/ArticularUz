@@ -80,8 +80,9 @@ BASEROW_TABLE_IDS = {
 
 LOCATIONS = {
     "Tashkent": "https://t.me/articularuztoshkent",
-    "Tashkent Region": "https://t.me/+your_tashkent_region_group_invite",
-    "Samarkand": "https://t.me/+your_samarkand_group_invite",
+    # Add real invite links for these locations before enabling their Join button.
+    "Tashkent Region": "",
+    "Samarkand": "",
     "Bukhara": "https://t.me/articularuzbuxoro",
     "Andijan": "https://t.me/articularuzandijon",
     "Fergana": "https://t.me/articularuzfargona",
@@ -122,66 +123,6 @@ logger = logging.getLogger(__name__)
     LOCATION,
     EDIT_INFO_MENU,
 ) = range(7)
-
-
-# =====================================================================
-# BASEROW HELPERS
-# =====================================================================
-
-def _baserow_headers():
-    return {
-        "Authorization": f"Token {BASEROW_TOKEN}",
-        "Content-Type": "application/json",
-        "User-Agent": "ArticularUzBot/1.0",
-        "Accept": "application/json",
-    }
-
-
-def _baserow_payload(
-    user_id: int,
-    username: str,
-    full_name: str,
-    age: int,
-    phone: str,
-    location: str,
-    registered_at: str | None = None,
-):
-    payload = {
-        "Full Name": full_name,
-        "Age": age,
-        "Phone": phone,
-        "Telegram Username": username,
-        "Telegram ID": user_id,
-        "Event Location": location,
-    }
-
-    if registered_at:
-        payload["Registered At"] = registered_at
-
-    return payload
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-# =====================================================================
-# TELEGRAM USERNAME
-# =====================================================================
-
-def get_telegram_username(user) -> str:
-    """
-    Always get the current Telegram username directly from Telegram.
-    Returns @username or an empty string.
-    """
-
-    if not user:
-        return ""
-
-    if user.username:
-        return f"@{user.username}"
-
-    return ""
 
 
 # =====================================================================
@@ -261,7 +202,7 @@ def _get_baserow_rows_sync(table_name: str, user_id: int):
     """
     query = urllib.parse.urlencode({
         "user_field_names": "true",
-        "size": "1",
+        "size": "200",
         "filter__Telegram ID__equal": str(user_id),
     })
 
@@ -319,6 +260,8 @@ def _sync_users_table_sync(
             if not 200 <= response.status < 300:
                 raise RuntimeError(f"Users update failed: HTTP {response.status}")
 
+        for duplicate in rows[1:]:
+            _delete_baserow_row_sync("Users", duplicate["id"])
         logger.info("Updated Users row %s for Telegram ID %s", row_id, user_id)
         return
 
@@ -394,6 +337,8 @@ def _sync_city_row_sync(
                     f"{city} update failed: HTTP {response.status}"
                 )
 
+        for duplicate in rows[1:]:
+            _delete_baserow_row_sync(city, duplicate["id"])
         logger.info("Updated Telegram ID %s in %s", user_id, city)
         return
 
@@ -419,6 +364,20 @@ def _sync_city_row_sync(
             raise RuntimeError(f"{city} creation failed: HTTP {response.status}")
 
     logger.info("Added Telegram ID %s to %s", user_id, city)
+
+
+def _delete_baserow_row_sync(table_name: str, row_id: int):
+    """Delete one row by its Baserow row ID."""
+    request = urllib.request.Request(
+        _baserow_url(table_name, row_id),
+        method="DELETE",
+        headers=_baserow_headers(),
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(
+                f"Failed deleting row {row_id} from {table_name}: HTTP {response.status}"
+            )
 
 
 # =====================================================================
@@ -533,24 +492,19 @@ def _sync_user_to_baserow_sync(
         with ThreadPoolExecutor(max_workers=2) as executor:
             users_future = executor.submit(sync_users)
             city_future = executor.submit(sync_city)
-
             users_future.result()
             city_future.result()
 
-        logger.info(
-            "Fast Baserow sync completed for Telegram ID %s",
-            user_id,
-        )
-
+        logger.info("Baserow sync completed for Telegram ID %s", user_id)
+        return True
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         logger.error("Baserow HTTP error %s: %s", exc.code, body)
-
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.error("Baserow connection error: %s", exc)
-
     except Exception:
         logger.exception("Unexpected Baserow synchronization error")
+    return False
 
 
 async def sync_user_to_baserow(
@@ -561,7 +515,7 @@ async def sync_user_to_baserow(
     phone: int | str,
     location: str,
 ):
-    await asyncio.to_thread(
+    return await asyncio.to_thread(
         _sync_user_to_baserow_sync,
         user_id,
         username,
@@ -584,14 +538,15 @@ async def cancel_user_in_baserow(
     phone: str,
     registered_city: str,
 ):
-    """
-    Cancel registration in Baserow without scanning every city.
+    """Clear the Users location and remove all city rows for this user.
 
-    Users row is cleared and the user's row is deleted from the exact city
-    where the local database says they were registered.
+    This deliberately checks every city only on cancellation, because stale
+    SQLite state or historical duplicate rows must not leave an event active
+    in Baserow after the user cancels.
     """
     if not BASEROW_TOKEN:
-        return
+        logger.error("Cannot cancel Baserow registration: BASEROW_TOKEN is missing")
+        return False
 
     def clear_users():
         _sync_users_table_sync(
@@ -603,30 +558,18 @@ async def cancel_user_in_baserow(
             location="",
         )
 
-    def delete_city():
-        if registered_city in VALID_CITIES:
-            _delete_user_from_city_sync(
-                registered_city,
-                user_id,
-            )
+    tasks = [asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
+             for city in VALID_CITIES]
+    tasks.append(asyncio.to_thread(clear_users))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    errors = [result for result in results if isinstance(result, BaseException)]
+    if errors:
+        for error in errors:
+            logger.error("Baserow cancellation step failed for Telegram ID %s: %s", user_id, error)
+        return False
 
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            users_future = executor.submit(clear_users)
-            city_future = executor.submit(delete_city)
-            users_future.result()
-            city_future.result()
-
-        logger.info(
-            "Fast Baserow cancellation completed for Telegram ID %s from %s",
-            user_id,
-            registered_city,
-        )
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        logger.error("Baserow cancellation HTTP error %s: %s", exc.code, body)
-    except Exception:
-        logger.exception("Unexpected Baserow cancellation error")
+    logger.info("Baserow cancellation completed for Telegram ID %s (previous city: %s)", user_id, registered_city)
+    return True
 
 
 # SQLITE DATABASE
@@ -707,6 +650,28 @@ def init_db():
             """
             CREATE INDEX IF NOT EXISTS idx_event_location
             ON event_registrations(location)
+            """
+        )
+
+        # Keep the newest active registration if old data contains duplicates.
+        cursor.execute(
+            """
+            UPDATE event_registrations
+            SET cancelled_at = CURRENT_TIMESTAMP
+            WHERE cancelled_at IS NULL
+              AND registration_id NOT IN (
+                  SELECT MAX(registration_id)
+                  FROM event_registrations
+                  WHERE cancelled_at IS NULL
+                  GROUP BY user_id
+              )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_event_per_user
+            ON event_registrations(user_id)
+            WHERE cancelled_at IS NULL
             """
         )
 
@@ -841,52 +806,35 @@ def get_active_event_registration(user_id: int):
         conn.close()
 
 
-def create_event_registration(
-    user_id: int,
-    location: str,
-):
+def create_event_registration(user_id: int, location: str):
+    """Atomically create at most one active event registration per user."""
+    if location not in VALID_CITIES:
+        raise ValueError(f"Invalid event location: {location!r}")
+
     conn = get_db_connection()
-
     try:
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT registration_id
-            FROM event_registrations
-            WHERE
-                user_id = ?
-                AND cancelled_at IS NULL
-            LIMIT 1
-            """,
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            """SELECT registration_id FROM event_registrations
+               WHERE user_id = ? AND cancelled_at IS NULL
+               ORDER BY registration_id DESC LIMIT 1""",
             (user_id,),
-        )
-
-        existing = cursor.fetchone()
-
+        ).fetchone()
         if existing:
+            conn.rollback()
             return None
 
-        cursor.execute(
-            """
-            INSERT INTO event_registrations (
-                user_id,
-                location
-            )
-            VALUES (?, ?)
-            """,
-            (
-                user_id,
-                location,
-            ),
+        cursor = conn.execute(
+            "INSERT INTO event_registrations (user_id, location) VALUES (?, ?)",
+            (user_id, location),
         )
-
         registration_id = cursor.lastrowid
-
         conn.commit()
-
         return registration_id
-
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        # A concurrent request may have created the registration first.
+        return None
     finally:
         conn.close()
 
@@ -930,6 +878,78 @@ def cancel_latest_event_registration(user_id: int):
 
     finally:
         conn.close()
+
+
+async def get_user_with_baserow_fallback(user_id: int):
+    """Return a local profile, recovering it from Baserow when SQLite is empty.
+
+    When the remote profile records an event location but SQLite has no active
+    registration, reconstruct the local active registration as well. This is
+    important after an ephemeral-host restart or database replacement.
+    """
+    local_user = get_user(user_id)
+    active = get_active_event_registration(user_id)
+
+    if local_user and active:
+        if local_user[5] != active[1]:
+            save_user(user_id, local_user[1] or "", local_user[2] or "", local_user[3] or 0,
+                      local_user[4] or "", active[1])
+            local_user = get_user(user_id)
+        return local_user
+
+    if local_user and local_user[5] in VALID_CITIES and not active:
+        registration_id = create_event_registration(user_id, local_user[5])
+        if registration_id is not None:
+            return local_user
+        active = get_active_event_registration(user_id)
+        if active:
+            save_user(user_id, local_user[1] or "", local_user[2] or "", local_user[3] or 0,
+                      local_user[4] or "", active[1])
+            return get_user(user_id)
+
+    # Avoid a remote request for a healthy local profile unless the event state
+    # is missing; the Baserow lookup repairs fresh SQLite deployments.
+    if local_user and local_user[5] and local_user[5] not in VALID_CITIES:
+        return local_user
+    try:
+        rows = await asyncio.to_thread(_get_baserow_rows_sync, "Users", user_id)
+    except Exception:
+        logger.exception("Could not recover Telegram ID %s from Baserow", user_id)
+        return local_user
+
+    if not rows:
+        return local_user
+
+    row = rows[0]
+    username = (row.get("Telegram Username") or "").lstrip("@")
+    full_name = row.get("Full Name") or ""
+    raw_age = row.get("Age")
+    try:
+        age_value = int(raw_age) if raw_age not in (None, "") else 0
+    except (TypeError, ValueError):
+        age_value = 0
+    phone_value = str(row.get("Phone") or "")
+    remote_location = row.get("Event Location") or ""
+
+    # Preserve locally edited fields if SQLite already has a profile; otherwise
+    # use Baserow as the recovery source.
+    if local_user:
+        username = local_user[1] or username
+        full_name = local_user[2] or full_name
+        age_value = local_user[3] or age_value
+        phone_value = local_user[4] or phone_value
+        # Local SQLite is authoritative when a local profile exists. In
+        # particular, a blank local location means the user cancelled; do not
+        # reactivate a stale remote location if a previous Baserow sync failed.
+        remote_location = local_user[5] or ""
+
+    save_user(user_id, username, full_name, age_value, phone_value, remote_location)
+    if remote_location in VALID_CITIES and not get_active_event_registration(user_id):
+        create_event_registration(user_id, remote_location)
+    active = get_active_event_registration(user_id)
+    if active:
+        save_user(user_id, username, full_name, age_value, phone_value, active[1])
+    return get_user(user_id)
 
 
 # =====================================================================
@@ -1165,26 +1185,11 @@ def get_registered_event_keyboard():
 
 
 def get_join_group_keyboard(location):
-    group_link = LOCATIONS.get(
-        location,
-        "https://t.me/your_articular_group",
-    )
-
+    group_link = LOCATIONS.get(location, "")
+    if not group_link or "your_" in group_link:
+        return None
     return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "🔗 Join group",
-                    url=group_link,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Cancel registration",
-                    callback_data="cancel_registration",
-                )
-            ],
-        ]
+        [[InlineKeyboardButton("🔗 Join group", url=group_link)]]
     )
 
 
@@ -1253,7 +1258,7 @@ async def start(
         await send_subscription_prompt(update.effective_message)
         return MENU_SECTION
 
-    existing_user = get_user(user_id)
+    existing_user = await get_user_with_baserow_fallback(user_id)
     if existing_user:
         load_user_into_context(existing_user, context)
         await update.effective_message.reply_text(
@@ -1282,7 +1287,7 @@ async def restart(
         await send_subscription_prompt(update.effective_message)
         return MENU_SECTION
 
-    existing_user = get_user(user_id)
+    existing_user = await get_user_with_baserow_fallback(user_id)
     if existing_user:
         load_user_into_context(existing_user, context)
         await update.effective_message.reply_text(
@@ -1316,25 +1321,8 @@ async def check_subscription_callback(
 
     await query.answer("Subscription confirmed!")
 
-    # Look in SQLite first, then Baserow. Railway deployments can have a fresh
-    # local SQLite file while the user's existing registration is still in Baserow.
     context.user_data.clear()
-    existing_user = get_user(user_id)
-    if not existing_user:
-        try:
-            rows = await asyncio.to_thread(_get_baserow_rows_sync, "Users", user_id)
-            if rows:
-                row = rows[0]
-                existing_user = (
-                    user_id,
-                    (row.get("Telegram Username") or "").lstrip("@"),
-                    row.get("Full Name") or "",
-                    row.get("Age"),
-                    row.get("Phone") or "",
-                    row.get("Event Location") or "",
-                )
-        except Exception:
-            logger.exception("Could not check Baserow for existing user %s", user_id)
+    existing_user = await get_user_with_baserow_fallback(user_id)
 
     if existing_user:
         load_user_into_context(existing_user, context)
@@ -1399,7 +1387,7 @@ async def menu_command(
         await send_subscription_prompt(update.effective_message)
         return MENU_SECTION
 
-    existing_user = get_user(user_id)
+    existing_user = await get_user_with_baserow_fallback(user_id)
 
     if not existing_user:
         await update.message.reply_text(
@@ -1444,7 +1432,7 @@ async def start_button_callback(
         )
         return MENU_SECTION
 
-    existing_user = get_user(user_id)
+    existing_user = await get_user_with_baserow_fallback(user_id)
 
     await query.edit_message_reply_markup(
         reply_markup=None
@@ -1609,7 +1597,13 @@ async def phone(
     phone_number = None
 
     if update.message.contact:
-        phone_number = update.message.contact.phone_number
+        contact = update.message.contact
+        if contact.user_id is not None and contact.user_id != update.effective_user.id:
+            await update.message.reply_text(
+                "Please share your own contact using the button below, or type your phone number."
+            )
+            return PHONE
+        phone_number = contact.phone_number
 
     elif update.message.text:
         text = update.message.text.strip()
@@ -1847,11 +1841,8 @@ async def menu_handler(
 
     if text == "👤 Profile":
         user_id = update.effective_user.id
-        existing_user = get_user(user_id)
+        existing_user = await get_user_with_baserow_fallback(user_id)
 
-        # Railway may have a fresh local SQLite database while this user's
-        # profile still exists in Baserow. Check Baserow before treating them
-        # as a new user and starting registration again.
         if not existing_user:
             try:
                 rows = await asyncio.to_thread(_get_baserow_rows_sync, "Users", user_id)
@@ -1912,7 +1903,7 @@ async def menu_handler(
         return MENU_SECTION
 
     if text == "✏️ Change profile info":
-        existing_user = get_user(
+        existing_user = await get_user_with_baserow_fallback(
             update.effective_user.id
         )
 
@@ -1970,9 +1961,8 @@ async def menu_handler(
     if text == "🎯 Choose an event":
         user_id = update.effective_user.id
 
-        active_registration = get_active_event_registration(
-            user_id
-        )
+        await get_user_with_baserow_fallback(user_id)
+        active_registration = get_active_event_registration(user_id)
 
         if active_registration:
             (
@@ -2037,9 +2027,8 @@ async def location_chosen(
 
         return MENU_SECTION
 
-    active_registration = get_active_event_registration(
-        user_id
-    )
+    await get_user_with_baserow_fallback(user_id)
+    active_registration = get_active_event_registration(user_id)
 
     if active_registration:
         (
@@ -2131,104 +2120,90 @@ async def register_event_callback(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
-
     await query.answer()
-
     user_id = query.from_user.id
-
-    chosen = context.user_data.get(
-        "selected_event_location"
-    )
+    chosen = context.user_data.get("selected_event_location")
 
     if chosen not in VALID_CITIES:
-        await query.edit_message_text(
-            "No valid event location selected."
-        )
-
+        await query.edit_message_text("No valid event location selected. Please choose a location again.")
+        await query.message.reply_text("Choose an option from the menu below:", reply_markup=get_main_menu_keyboard())
         return MENU_SECTION
 
-    active_registration = get_active_event_registration(
-        user_id
-    )
-
+    existing_user = await get_user_with_baserow_fallback(user_id)
+    active_registration = get_active_event_registration(user_id)
     if active_registration:
-        (
-            _registration_id,
-            registered_location,
-        ) = active_registration
-
-        context.user_data.pop(
-            "selected_event_location",
-            None,
-        )
-
+        registered_location = active_registration[1]
+        context.user_data["location"] = registered_location
+        context.user_data.pop("selected_event_location", None)
         await query.edit_message_text(
             "You are already registered! ✅\n\n"
-            f"📍 Event location: {registered_location}"
+            f"📍 Event location: {registered_location}\n\n"
+            "You cannot register for another location while this registration is active."
         )
-
         await query.message.reply_text(
-            "Use the button below to go back.",
+            "You can cancel your current location or go back.",
             reply_markup=get_registered_event_keyboard(),
         )
-
         return LOCATION
 
-    username_value = get_telegram_username(
-        query.from_user
-    )
-
-    if username_value:
-        context.user_data["telegram_username"] = username_value
-
-    full_name_value = context.user_data.get(
-        "full_name",
-        "",
-    )
-
-    age_value = context.user_data.get(
-        "age",
-        0,
-    )
-
-    phone_value = context.user_data.get(
-        "phone",
-        "",
-    )
-
-    context.user_data["location"] = chosen
-
-    save_user(
-        user_id=user_id,
-        username=username_value,
-        full_name=full_name_value,
-        age=age_value,
-        phone=phone_value,
-        location=chosen,
-    )
-
-    registration_id = create_event_registration(
-        user_id,
-        chosen,
-    )
-
-    if registration_id is None:
-        await query.edit_message_text(
-            "You are already registered for an event. "
-            "Please check your current registration."
-        )
-
+    if not existing_user:
+        await query.edit_message_text("Your profile could not be found. Please use /start to register first.")
+        await query.message.reply_text("Choose an option from the menu below:", reply_markup=get_main_menu_keyboard())
         return MENU_SECTION
 
-    await sync_user_to_baserow(
+    username_value = get_telegram_username(query.from_user) or context.user_data.get("telegram_username", "")
+    full_name_value = context.user_data.get("full_name") or existing_user[2] or ""
+    age_value = context.user_data.get("age") or existing_user[3] or 0
+    phone_value = context.user_data.get("phone") or existing_user[4] or ""
+
+    if not full_name_value or not age_value or not phone_value:
+        await query.edit_message_text("Your profile is incomplete. Please update your profile before registering for an event.")
+        await query.message.reply_text("Choose an option from the menu below:", reply_markup=get_main_menu_keyboard())
+        return MENU_SECTION
+
+    # The profile row already exists. Do not write its location until the
+    # atomic event-registration insert succeeds; a second rapid click must not
+    # clear the location written by the first successful request.
+    registration_id = create_event_registration(user_id, chosen)
+    if registration_id is None:
+        active_registration = get_active_event_registration(user_id)
+        registered_location = active_registration[1] if active_registration else "another location"
+        await query.edit_message_text(
+            "You already have an active event registration.\n"
+            f"📍 Event location: {registered_location}"
+        )
+        await query.message.reply_text(
+            "You can cancel your current location or go back.",
+            reply_markup=get_registered_event_keyboard(),
+        )
+        return LOCATION
+
+    # Update profile location only after the active registration was created.
+    save_user(user_id, username_value, full_name_value, int(age_value), phone_value, chosen)
+    context.user_data.update({
+        "telegram_username": username_value,
+        "full_name": full_name_value,
+        "age": int(age_value),
+        "phone": phone_value,
+        "location": chosen,
+    })
+
+    synced = await sync_user_to_baserow(
         user_id=user_id,
         username=username_value,
         full_name=full_name_value,
-        age=age_value,
+        age=int(age_value),
         phone=phone_value,
         location=chosen,
     )
 
+    group_keyboard = get_join_group_keyboard(chosen)
+    group_note = (
+        f"Press the button below to join the {chosen} group."
+        if group_keyboard
+        else f"The {chosen} group link has not been configured yet. Please contact an ArticularUz administrator."
+    )
+    sync_note = "" if synced else "\n\n⚠️ Your registration is saved, but the online database sync failed temporarily. Please contact an administrator if this persists."
     summary = (
         "You're registered! ✅\n\n"
         f"👤 Name: {full_name_value}\n"
@@ -2236,24 +2211,11 @@ async def register_event_callback(
         f"📞 Phone: {phone_value}\n"
         f"📱 Username: {username_value or 'No username'}\n"
         f"📍 Location: {chosen}\n\n"
-        f"Press the button below to join the {chosen} group."
+        f"{group_note}{sync_note}"
     )
-
-    await query.edit_message_text(
-        summary,
-        reply_markup=get_join_group_keyboard(chosen),
-    )
-
-    context.user_data.pop(
-        "selected_event_location",
-        None,
-    )
-
-    await query.message.reply_text(
-        "What would you like to do next?",
-        reply_markup=get_main_menu_keyboard(),
-    )
-
+    await query.edit_message_text(summary, reply_markup=group_keyboard)
+    context.user_data.pop("selected_event_location", None)
+    await query.message.reply_text("What would you like to do next?", reply_markup=get_main_menu_keyboard())
     return MENU_SECTION
 
 
@@ -2306,11 +2268,9 @@ async def event_back_callback(
     # Edit the existing event message instead of sending
     # a separate "Back" message.
     try:
-        await query.edit_message_text(
-            "Choose an option from the menu below:"
-        )
+        await query.edit_message_text("Returned to the main menu.")
     except Exception:
-        pass
+        logger.debug("Could not edit event message while going back", exc_info=True)
 
     await query.message.reply_text(
         "Choose an option from the menu below:",
@@ -2329,95 +2289,41 @@ async def cancel_registration_callback(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
-
     await query.answer()
-
     user_id = query.from_user.id
-
-    # Get the registered city BEFORE cancelling the registration.
+    await get_user_with_baserow_fallback(user_id)
     active_registration = get_active_event_registration(user_id)
+    registered_location = active_registration[1] if active_registration else context.user_data.get("location", "")
 
-    registered_location = (
-        active_registration[1]
-        if active_registration
-        else context.user_data.get("location", "")
-    )
+    cancelled = cancel_latest_event_registration(user_id)
+    if cancelled:
+        conn = get_db_connection()
+        try:
+            conn.execute("UPDATE users SET location = '' WHERE user_id = ?", (user_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        context.user_data["location"] = ""
+        context.user_data.pop("selected_event_location", None)
 
-    cancelled = cancel_latest_event_registration(
-        user_id
-    )
-
-    if not cancelled:
-        await query.edit_message_text(
-            "You do not have an active event registration."
-        )
-
-        await query.message.reply_text(
-            "Choose an option from the menu below:",
-            reply_markup=get_main_menu_keyboard(),
-        )
-
-        return MENU_SECTION
-
-    conn = get_db_connection()
-
-    try:
-        conn.execute(
-            """
-            UPDATE users
-            SET location = ''
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        )
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-    context.user_data["location"] = ""
-
-    context.user_data.pop(
-        "selected_event_location",
-        None,
-    )
-
-    username_value = get_telegram_username(
-        query.from_user
-    )
-
-    if username_value:
-        context.user_data["telegram_username"] = username_value
-
-    await cancel_user_in_baserow(
+    username_value = get_telegram_username(query.from_user) or context.user_data.get("telegram_username", "")
+    synced = await cancel_user_in_baserow(
         user_id=user_id,
-        username=username_value or context.user_data.get(
-            "telegram_username",
-            "",
-        ),
-        full_name=context.user_data.get(
-            "full_name",
-            "",
-        ),
-        age=context.user_data.get(
-            "age",
-            0,
-        ),
-        phone=context.user_data.get(
-            "phone",
-            "",
-        ),
+        username=username_value,
+        full_name=context.user_data.get("full_name", ""),
+        age=context.user_data.get("age", 0),
+        phone=context.user_data.get("phone", ""),
         registered_city=registered_location,
     )
 
-    await query.edit_message_text(
-        "Your event registration has been cancelled. ❌\n\n"
-        "Your profile is still saved. ✅"
-    )
-
-
-
+    if not cancelled:
+        message = "No active event registration was found. I checked the online city tables for stale rows."
+    else:
+        message = "Your event registration has been cancelled. ❌\n\nYour profile is still saved. ✅"
+    if not synced:
+        message += "\n\n⚠️ The online database could not be fully updated. Please contact an administrator."
+    await query.edit_message_text(message)
+    await query.message.reply_text("Choose an option from the menu below:", reply_markup=get_main_menu_keyboard())
     return MENU_SECTION
 
 
@@ -2430,98 +2336,69 @@ async def cancel_location_from_profile(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     user_id = update.effective_user.id
-
-    active_registration = get_active_event_registration(
-        user_id
-    )
+    await get_user_with_baserow_fallback(user_id)
+    active_registration = get_active_event_registration(user_id)
 
     if not active_registration:
+        # Also repair historical stale Baserow city rows when SQLite says none.
+        profile = await get_user_with_baserow_fallback(user_id)
+        if profile:
+            ok = await cancel_user_in_baserow(
+                user_id=user_id,
+                username=get_telegram_username(update.effective_user) or profile[1] or "",
+                full_name=profile[2] or "",
+                age=profile[3] or 0,
+                phone=profile[4] or "",
+                registered_city=profile[5] or "",
+            )
+            if not ok:
+                await update.message.reply_text(
+                    "No active local registration was found, but the online database could not be fully checked. Please try again later.",
+                    reply_markup=get_back_keyboard(),
+                )
+                return LOCATION
         await update.message.reply_text(
-            "You are not registered for any "
-            "event location. 📍",
+            "You are not registered for any event location. 📍",
             reply_markup=get_back_keyboard(),
         )
-
         return LOCATION
 
-    (
-        _registration_id,
-        registered_location,
-    ) = active_registration
-
-    cancelled = cancel_latest_event_registration(
-        user_id
-    )
-
+    registered_location = active_registration[1]
+    cancelled = cancel_latest_event_registration(user_id)
     if not cancelled:
         await update.message.reply_text(
-            "Your event registration could not "
-            "be cancelled.",
+            "Your event registration could not be cancelled. Please try again.",
             reply_markup=get_back_keyboard(),
         )
-
         return LOCATION
 
     conn = get_db_connection()
-
     try:
-        conn.execute(
-            """
-            UPDATE users
-            SET location = ''
-            WHERE user_id = ?
-            """,
-            (user_id,),
-        )
-
+        conn.execute("UPDATE users SET location = '' WHERE user_id = ?", (user_id,))
         conn.commit()
-
     finally:
         conn.close()
 
     context.user_data["location"] = ""
+    context.user_data.pop("selected_event_location", None)
+    username_value = get_telegram_username(update.effective_user) or context.user_data.get("telegram_username", "")
+    context.user_data["telegram_username"] = username_value
 
-    context.user_data.pop(
-        "selected_event_location",
-        None,
-    )
-
-    username_value = get_telegram_username(
-        update.effective_user
-    )
-
-    if username_value:
-        context.user_data["telegram_username"] = username_value
-
-    await sync_user_to_baserow(
+    synced = await cancel_user_in_baserow(
         user_id=user_id,
-        username=username_value or context.user_data.get(
-            "telegram_username",
-            "",
-        ),
-        full_name=context.user_data.get(
-            "full_name",
-            "",
-        ),
-        age=context.user_data.get(
-            "age",
-            0,
-        ),
-        phone=context.user_data.get(
-            "phone",
-            "",
-        ),
-        location="",
+        username=username_value,
+        full_name=context.user_data.get("full_name", ""),
+        age=context.user_data.get("age", 0),
+        phone=context.user_data.get("phone", ""),
+        registered_city=registered_location,
     )
-
+    suffix = "" if synced else "\n\n⚠️ The local cancellation succeeded, but the online database could not be fully updated. Please contact an administrator."
     await update.message.reply_text(
-        f"Your {registered_location} event "
-        "registration has been cancelled. ❌\n\n"
+        f"Your {registered_location} event registration has been cancelled. ❌\n\n"
         "Your profile information is still saved. ✅\n"
-        "You can register for another location anytime.",
+        "You can register for another location anytime." + suffix,
         reply_markup=get_back_keyboard(),
     )
-
     return LOCATION
 
 
@@ -2813,6 +2690,10 @@ def main():
 
     conv_handler = ConversationHandler(
         entry_points=[
+            CallbackQueryHandler(
+                check_subscription_callback,
+                pattern=r"^check_subscription$",
+            ),
             CommandHandler(
                 "start",
                 start,
@@ -2833,6 +2714,10 @@ def main():
             # =========================================================
 
             MENU_SECTION: [
+                CallbackQueryHandler(
+                    check_subscription_callback,
+                    pattern=r"^check_subscription$",
+                ),
                 CallbackQueryHandler(
                     start_button_callback,
                     pattern=r"^start_registration$",
@@ -3054,13 +2939,6 @@ def main():
     # Gate all bot interactions when the user has left the required channel.
     app.add_handler(TypeHandler(Update, subscription_guard), group=-1)
 
-    # Handle the subscription-check button globally, including before registration.
-    app.add_handler(
-        CallbackQueryHandler(
-            check_subscription_callback,
-            pattern=r"^check_subscription$",
-        )
-    )
     app.add_handler(conv_handler)
 
     logger.info(
@@ -3075,7 +2953,7 @@ def main():
         )
 
     app.run_polling(
-        drop_pending_updates=True
+        drop_pending_updates=False
     )
 
 
@@ -3086,4 +2964,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
