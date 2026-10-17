@@ -995,16 +995,16 @@ def get_main_menu_keyboard():
     )
 
 
+
 def get_back_keyboard():
-    # Used on the Choose an event screen: cancellation belongs here,
-    # not in the profile-edit menu.
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🔙 Back")],
             [KeyboardButton("❌ Cancel Location")],
+            [KeyboardButton("🔙 Back")],
         ],
         resize_keyboard=True,
     )
+
 
 
 def get_profile_register_keyboard():
@@ -1668,17 +1668,25 @@ async def phone(
         context,
     )
 
+
     await update.message.reply_text(
-        "Registration completed successfully! ✅",
+        "Registration completed successfully! ✅\n\n"
+        "Now, let's register you for an event! 🎯",
         reply_markup=ReplyKeyboardRemove(),
     )
 
     await update.message.reply_text(
-        "Choose an option from the menu below:",
-        reply_markup=get_main_menu_keyboard(),
+        "Select your preferred event location:",
+        reply_markup=get_event_location_keyboard(),
     )
 
-    return MENU_SECTION
+    await update.message.reply_text(
+        "Use the buttons below to go back or cancel.",
+        reply_markup=get_back_keyboard(),
+    )
+
+    return LOCATION
+
 
 
 # =====================================================================
@@ -3079,3 +3087,4 @@ def main():
 if __name__ == "__main__":
     main()
 
+delete_user(6757152518)
