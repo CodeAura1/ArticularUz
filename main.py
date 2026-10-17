@@ -3087,4 +3087,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-delete_user(6757152518)
