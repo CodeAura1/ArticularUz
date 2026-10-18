@@ -39,6 +39,14 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASEROW_TOKEN = os.getenv("BASEROW_TOKEN")
 
+# Optional channel whose posts should be forwarded to all users who have started the bot.
+# Set ANNOUNCEMENT_CHANNEL_ID to the channel numeric ID (usually starts with -100).
+_announcement_channel_id = os.getenv("ANNOUNCEMENT_CHANNEL_ID", "").strip()
+try:
+    ANNOUNCEMENT_CHANNEL_ID = int(_announcement_channel_id) if _announcement_channel_id else None
+except ValueError:
+    raise RuntimeError("ANNOUNCEMENT_CHANNEL_ID must be a numeric Telegram channel ID.")
+
 if not BOT_TOKEN:
     raise RuntimeError(
         "BOT_TOKEN is not configured. Set BOT_TOKEN as an environment variable."
@@ -52,9 +60,9 @@ if not BASEROW_TOKEN:
 WEBSITE_URL = "https://articular.uz"
 WEBSITE_IMAGE = "LOGO ARTICULARUZ (2).png"
 
-# The bot must be an administrator of this channel to reliably check membership.
 SUBSCRIPTION_CHANNEL = "@articularuz"
 SUBSCRIPTION_CHANNEL_URL = "https://t.me/articularuz"
+
 
 
 # =====================================================================
@@ -68,7 +76,7 @@ BASEROW_TABLE_IDS = {
     "Tashkent": "1241776",
     "Tashkent Region": "1241955",
     "Bukhara": "1241780",
-    "Samarkand": "1241781",
+    "Sirdaryo": "1241781",
     "Andijan": "1241953",
     "Fergana": "1241951",
 }
@@ -81,8 +89,8 @@ BASEROW_TABLE_IDS = {
 LOCATIONS = {
     "Tashkent": "https://t.me/articularuztoshkent",
     # Add real invite links for these locations before enabling their Join button.
-    "Tashkent Region": "",
-    "Samarkand": "",
+    "Tashkent Region": "https://t.me/articularuztoshkent",
+    "Sirdaryo": "",
     "Bukhara": "https://t.me/articularuzbuxoro",
     "Andijan": "https://t.me/articularuzandijon",
     "Fergana": "https://t.me/articularuzfargona",
@@ -91,7 +99,7 @@ LOCATIONS = {
 VALID_CITIES = (
     "Tashkent",
     "Tashkent Region",
-    "Samarkand",
+    "Sirdaryo",
     "Bukhara",
     "Andijan",
     "Fergana",
@@ -143,7 +151,7 @@ def _baserow_headers():
     return {
         "Authorization": f"Token {BASEROW_TOKEN}",
         "Content-Type": "application/json",
-        "User-Agent": "ArticularUzBot/1.0",
+        "User-Agent": "ArticularUZBot/1.0",
         "Accept": "application/json",
     }
 
@@ -653,6 +661,19 @@ def init_db():
             """
         )
 
+        # Track everyone who has started the bot, including users who have not
+        # completed registration. This avoids creating incomplete profile rows in Baserow.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS broadcast_recipients (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         # Keep the newest active registration if old data contains duplicates.
         cursor.execute(
             """
@@ -679,6 +700,75 @@ def init_db():
 
     finally:
         conn.close()
+
+
+# =====================================================================
+# BROADCAST RECIPIENTS
+# =====================================================================
+
+def remember_broadcast_recipient(user) -> None:
+    """Remember every person who starts/restarts the bot for future broadcasts."""
+    if not user or getattr(user, "is_bot", False):
+        return
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO broadcast_recipients (user_id, username, first_seen, last_seen)
+            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                last_seen = CURRENT_TIMESTAMP
+            """,
+            (int(user.id), get_telegram_username(user)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_broadcast_recipient_ids() -> list[int]:
+    """Merge locally tracked bot starters with Telegram IDs in Baserow Users.
+
+    Local tracking includes people who started the bot but did not finish profile
+    registration. Baserow Users adds existing registered users after a redeploy.
+    """
+    recipient_ids: set[int] = set()
+
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT user_id FROM broadcast_recipients
+            UNION
+            SELECT user_id FROM users
+            """
+        ).fetchall()
+        recipient_ids.update(int(row[0]) for row in rows if row and row[0] is not None)
+    finally:
+        conn.close()
+
+    # Also load registered recipients from Baserow, including users from before
+    # the current Railway SQLite database was created. Follow pagination safely.
+    if BASEROW_TOKEN:
+        try:
+            url = f"{BASEROW_API_BASE}/{BASEROW_TABLE_IDS['Users']}/?user_field_names=true&size=200"
+            while url:
+                request = urllib.request.Request(url, method="GET", headers=_baserow_headers())
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                for row in data.get("results", []):
+                    value = row.get("Telegram ID")
+                    if value is not None:
+                        try:
+                            recipient_ids.add(int(value))
+                        except (TypeError, ValueError):
+                            logger.warning("Ignoring invalid Telegram ID in Baserow: %r", value)
+                url = data.get("next")
+        except Exception:
+            logger.exception("Could not load broadcast recipients from Baserow; using local recipients")
+
+    return sorted(recipient_ids)
 
 
 # =====================================================================
@@ -1103,7 +1193,7 @@ async def is_subscribed(bot, user_id: int) -> bool:
 
 async def send_subscription_prompt(message, *, edit=False):
     text = (
-        "Welcome to ArticularUz! 🚀\n\n"
+        "Welcome to ArticularUZ! 🚀\n\n"
         "Please subscribe to our Telegram channel to use the bot.\n"
         "After subscribing, press ‘Check subscription’."
     )
@@ -1132,8 +1222,8 @@ def get_event_location_keyboard():
             ],
             [
                 InlineKeyboardButton(
-                    "📍 Samarkand",
-                    callback_data="Samarkand",
+                    "📍 Sirdaryo",
+                    callback_data="Sirdaryo",
                 )
             ],
             [
@@ -1253,6 +1343,7 @@ async def start(
 ) -> int:
     context.user_data.clear()
     user_id = update.effective_user.id
+    remember_broadcast_recipient(update.effective_user)
 
     if not await is_subscribed(context.bot, user_id):
         await send_subscription_prompt(update.effective_message)
@@ -1262,14 +1353,14 @@ async def start(
     if existing_user:
         load_user_into_context(existing_user, context)
         await update.effective_message.reply_text(
-            "Welcome back to ArticularUz! 👋\n\n"
+            "Welcome back to ArticularUZ! 👋\n\n"
             "Choose an option from the menu below:",
             reply_markup=get_main_menu_keyboard(),
         )
         return MENU_SECTION
 
     await update.effective_message.reply_text(
-        "Welcome to ArticularUz! 🚀\n\n"
+        "Welcome to ArticularUZ! 🚀\n\n"
         "You're subscribed! Press Start to continue.",
         reply_markup=get_start_keyboard(),
     )
@@ -1282,6 +1373,7 @@ async def restart(
 ) -> int:
     context.user_data.clear()
     user_id = update.effective_user.id
+    remember_broadcast_recipient(update.effective_user)
 
     if not await is_subscribed(context.bot, user_id):
         await send_subscription_prompt(update.effective_message)
@@ -1291,14 +1383,14 @@ async def restart(
     if existing_user:
         load_user_into_context(existing_user, context)
         await update.effective_message.reply_text(
-            "Welcome back to ArticularUz! 👋\n\n"
+            "Welcome back to ArticularUZ! 👋\n\n"
             "Choose an option from the menu below:",
             reply_markup=get_main_menu_keyboard(),
         )
         return MENU_SECTION
 
     await update.effective_message.reply_text(
-        "Welcome to ArticularUz! 🚀\n\n"
+        "Welcome to ArticularUZ! 🚀\n\n"
         "You're subscribed! Press Start to continue.",
         reply_markup=get_start_keyboard(),
     )
@@ -1327,7 +1419,7 @@ async def check_subscription_callback(
     if existing_user:
         load_user_into_context(existing_user, context)
         await query.edit_message_text(
-            "Welcome back to ArticularUz! 👋\n\n"
+            "Welcome back to ArticularUZ! 👋\n\n"
             "Subscription confirmed!"
         )
         await query.message.reply_text(
@@ -1337,7 +1429,7 @@ async def check_subscription_callback(
         return MENU_SECTION
 
     await query.edit_message_text(
-        "Welcome to ArticularUz! 🚀\n\n"
+        "Welcome to ArticularUZ! 🚀\n\n"
         "Subscription confirmed! Let's get you registered. 📝"
     )
     await query.message.reply_text(
@@ -1426,7 +1518,7 @@ async def start_button_callback(
 
     if not await is_subscribed(context.bot, user_id):
         await query.edit_message_text(
-            "Welcome to ArticularUz! 🚀\n\n"
+            "Welcome to ArticularUZ! 🚀\n\n"
             "Please subscribe to our Telegram channel to use the bot.",
             reply_markup=get_subscription_keyboard(),
         )
@@ -2201,7 +2293,7 @@ async def register_event_callback(
     group_note = (
         f"Press the button below to join the {chosen} group."
         if group_keyboard
-        else f"The {chosen} group link has not been configured yet. Please contact an ArticularUz administrator."
+        else f"The {chosen} group link has not been configured yet. Please contact an ArticularUZ administrator."
     )
     sync_note = "" if synced else "\n\n⚠️ Your registration is saved, but the online database sync failed temporarily. Please contact an administrator if this persists."
     summary = (
@@ -2397,7 +2489,10 @@ async def cancel_location_from_profile(
         f"Your {registered_location} event registration has been cancelled. ❌\n\n"
         "Your profile information is still saved. ✅\n"
         "You can register for another location anytime." + suffix,
-        reply_markup=get_back_keyboard(),
+    )
+    await update.message.reply_text(
+        "📍 Choose a new event location:",
+        reply_markup=get_event_location_keyboard(),
     )
     return LOCATION
 
@@ -2633,13 +2728,13 @@ async def set_bot_commands(
 # =====================================================================
 
 async def subscription_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Require current channel membership before using any bot feature."""
+    """Require channel membership for bot interactions."""
+    message = update.effective_message
     user = update.effective_user
     if not user:
         return
 
     # Let these handlers run their own subscription flow / allow the user to retry.
-    message = update.effective_message
     if message and message.text and message.text.split()[0].split("@")[0] in ("/start", "/restart", "/menu"):
         return
     if update.callback_query and update.callback_query.data == "check_subscription":
@@ -2653,6 +2748,50 @@ async def subscription_guard(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if message:
             await send_subscription_prompt(message)
         raise ApplicationHandlerStop
+
+
+# =====================================================================
+# CHANNEL ANNOUNCEMENT BROADCAST
+# =====================================================================
+
+async def broadcast_from_announcement_channel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Copy posts from the configured announcements channel to every known bot user."""
+    message = update.channel_post
+    if not message or not ANNOUNCEMENT_CHANNEL_ID or message.chat_id != ANNOUNCEMENT_CHANNEL_ID:
+        return
+    if not (message.text is not None or message.photo or message.video or message.document
+            or message.animation or message.audio or message.voice or message.video_note):
+        return
+
+    recipient_ids = get_broadcast_recipient_ids()
+    sent = blocked = failed = 0
+    for recipient_id in recipient_ids:
+        try:
+            await context.bot.copy_message(chat_id=recipient_id, from_chat_id=message.chat_id, message_id=message.message_id)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if ("forbidden" in type(exc).__name__.lower() or "bot was blocked" in error_text
+                    or "user is deactivated" in error_text or "chat not found" in error_text):
+                blocked += 1
+            elif getattr(exc, "retry_after", None):
+                try:
+                    await asyncio.sleep(float(exc.retry_after) + 1)
+                    await context.bot.copy_message(chat_id=recipient_id, from_chat_id=message.chat_id, message_id=message.message_id)
+                    sent += 1
+                except Exception as retry_exc:
+                    if "forbidden" in type(retry_exc).__name__.lower() or "blocked" in str(retry_exc).lower():
+                        blocked += 1
+                    else:
+                        failed += 1
+            else:
+                failed += 1
+                logger.warning("Channel announcement delivery failed for Telegram user %s: %s", recipient_id, exc)
+    logger.info("Channel announcement broadcast complete: sent=%s blocked=%s failed=%s", sent, blocked, failed)
 
 
 # =====================================================================
@@ -2790,7 +2929,7 @@ def main():
                 # All six event locations.
                 CallbackQueryHandler(
                     location_chosen,
-                    pattern=r"^(Tashkent|Tashkent Region|Samarkand|Bukhara|Andijan|Fergana)$",
+                    pattern=r"^(Tashkent|Tashkent Region|Sirdaryo|Bukhara|Andijan|Fergana)$",
                 ),
 
                 CallbackQueryHandler(
@@ -2940,6 +3079,20 @@ def main():
     app.add_handler(TypeHandler(Update, subscription_guard), group=-1)
 
     app.add_handler(conv_handler)
+
+    if ANNOUNCEMENT_CHANNEL_ID:
+        app.add_handler(
+            MessageHandler(
+                filters.UpdateType.CHANNEL_POST
+                & (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL
+                   | filters.ANIMATION | filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE),
+                broadcast_from_announcement_channel,
+            ),
+            group=1,
+        )
+        logger.info("Channel announcement forwarding enabled for channel ID %s", ANNOUNCEMENT_CHANNEL_ID)
+    else:
+        logger.warning("Channel announcement forwarding is disabled. Set ANNOUNCEMENT_CHANNEL_ID to enable it.")
 
     logger.info(
         "Bot started. Press Ctrl+C to stop."
