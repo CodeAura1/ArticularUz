@@ -20,6 +20,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
+from telegram.error import InvalidToken
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -96,6 +97,7 @@ BASEROW_TABLE_IDS = {
 LOCATIONS = {
     # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
+    # Replace these placeholders with your group invite links.
     "Sirdaryo": "https://t.me/articularuzsyrdarya",
     "Fergana": "https://t.me/articularuzfargona",
     "Andijan": "https://t.me/articularuzandijon",
@@ -610,12 +612,10 @@ async def cancel_user_in_baserow(
 # SQLITE DATABASE
 # =====================================================================
 
-# All persistent files must live inside DATA_DIR. Botxona provides this
-# environment variable; the local fallback keeps development convenient.
-DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "data",
-)
+# All persistent files must live inside DATA_DIR. Use Botxona's configured
+# directory, defaulting to /data rather than writing beside the source code.
+DATA_DIR = os.environ.get("DATA_DIR", "/data").strip() or "/data"
+DATA_DIR = os.path.abspath(DATA_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "registrations.db")
@@ -3162,7 +3162,16 @@ def main():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app.run_polling(drop_pending_updates=False)
+    try:
+        app.run_polling(drop_pending_updates=False)
+    except InvalidToken:
+        # python-telegram-bot's InvalidToken exception may include the rejected
+        # token in its message. Do not print the exception or its token.
+        logger.critical(
+            "Telegram rejected BOT_TOKEN. Create a new token with BotFather "
+            "and update BOT_TOKEN in the Botxona environment settings."
+        )
+        raise SystemExit(1) from None
 
 
 
