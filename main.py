@@ -38,8 +38,8 @@ from telegram.ext import (
 # CONFIG
 # =====================================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-BASEROW_TOKEN = os.getenv("BASEROW_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip() or None
+BASEROW_TOKEN = os.getenv("BASEROW_TOKEN", "").strip() or None
 
 # Optional channel whose posts should be forwarded to all users who have started the bot.
 # Set ANNOUNCEMENT_CHANNEL_ID to the channel numeric ID (usually starts with -100).
@@ -98,11 +98,11 @@ LOCATIONS = {
     # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
     # Replace these placeholders with your group invite links.
-    "Sirdaryo": "https://t.me/articularuzsyrdarya",
+    "Sirdaryo": "https://t.me/+your_sirdaryo_group_invite",
     "Fergana": "https://t.me/articularuzfargona",
     "Andijan": "https://t.me/articularuzandijon",
     "Bukhara": "https://t.me/articularuzbuxoro",
-    "Navoiy": "https://t.me/articularuznavoiy",
+    "Navoiy": "https://t.me/+your_navoiy_group_invite",
 }
 
 # Only these locations can be selected for a new registration.
