@@ -89,7 +89,7 @@ BASEROW_TABLE_IDS = {
 
 LOCATIONS = {
     "Tashkent Region": "https://t.me/articularuztoshkent",
-    "Sirdaryo": "",
+    "Sirdaryo": "https://t.me/+EVBsvVhvjCw5YzFi",
     "Fergana": "https://t.me/articularuzfargona",
 }
 
