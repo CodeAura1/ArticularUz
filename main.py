@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -87,23 +88,29 @@ BASEROW_TABLE_IDS = {
 # =====================================================================
 
 LOCATIONS = {
-    "Tashkent": "https://t.me/articularuztoshkent",
-    # Add real invite links for these locations before enabling their Join button.
     "Tashkent Region": "https://t.me/articularuztoshkent",
     "Sirdaryo": "",
-    "Bukhara": "https://t.me/articularuzbuxoro",
-    "Andijan": "https://t.me/articularuzandijon",
     "Fergana": "https://t.me/articularuzfargona",
 }
 
+# Only these locations can be selected for a new registration.
 VALID_CITIES = (
+    "Tashkent Region",
+    "Fergana",
+    "Sirdaryo",
+)
+
+# Retain old city tables for safe cleanup of legacy registrations, but never
+# expose these locations in the event keyboard.
+ALL_CITY_TABLES = (
     "Tashkent",
     "Tashkent Region",
-    "Sirdaryo",
     "Bukhara",
+    "Sirdaryo",
     "Andijan",
     "Fergana",
 )
+
 
 
 # =====================================================================
@@ -394,7 +401,7 @@ def _delete_baserow_row_sync(table_name: str, row_id: int):
 
 def _delete_user_from_city_sync(city: str, user_id: int):
     """Delete the user from one known city table only."""
-    if city not in VALID_CITIES:
+    if city not in ALL_CITY_TABLES:
         return
 
     rows = _get_baserow_rows_sync(city, user_id)
@@ -439,7 +446,7 @@ async def remove_user_from_city_tables(user_id: int, known_city: str | None = No
     # Run the six lookups concurrently instead of sequentially.
     await asyncio.gather(*[
         asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
-        for city in VALID_CITIES
+        for city in ALL_CITY_TABLES
     ], return_exceptions=True)
 
 
@@ -566,14 +573,20 @@ async def cancel_user_in_baserow(
             location="",
         )
 
-    tasks = [asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
-             for city in VALID_CITIES]
+    tasks = [
+        asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
+        for city in ALL_CITY_TABLES
+    ]
     tasks.append(asyncio.to_thread(clear_users))
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    errors = [result for result in results if isinstance(result, BaseException)]
+    errors = [result for result in results if isinstance(result, BaseException) or result is False]
     if errors:
         for error in errors:
-            logger.error("Baserow cancellation step failed for Telegram ID %s: %s", user_id, error)
+            logger.error(
+                "Baserow cancellation step failed for Telegram ID %s: %s",
+                user_id,
+                error,
+            )
         return False
 
     logger.info("Baserow cancellation completed for Telegram ID %s (previous city: %s)", user_id, registered_city)
@@ -595,8 +608,9 @@ def get_db_connection():
         timeout=30,
     )
 
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    # WAL mode is configured once in init_db(), not on every short-lived
+    # connection; repeatedly setting it adds avoidable locking/latency.
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=ON")
 
     return conn
@@ -606,6 +620,7 @@ def init_db():
     conn = get_db_connection()
 
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         cursor = conn.cursor()
 
         cursor.execute(
@@ -997,10 +1012,14 @@ async def get_user_with_baserow_fallback(user_id: int):
                       local_user[4] or "", active[1])
             return get_user(user_id)
 
-    # Avoid a remote request for a healthy local profile unless the event state
-    # is missing; the Baserow lookup repairs fresh SQLite deployments.
-    if local_user and local_user[5] and local_user[5] not in VALID_CITIES:
+    # SQLite is authoritative once a local profile exists. In particular, an
+    # empty location means the user cancelled or has not registered for an
+    # event; do not query Baserow and accidentally restore stale remote state.
+    # This also avoids a slow Baserow request on routine menu/profile actions.
+    if local_user:
         return local_user
+
+    # Only query Baserow when this deployment has no local profile to recover.
     try:
         rows = await asyncio.to_thread(_get_baserow_rows_sync, "Users", user_id)
     except Exception:
@@ -1175,18 +1194,41 @@ def get_subscription_keyboard():
     )
 
 
-async def is_subscribed(bot, user_id: int) -> bool:
-    """Check current channel membership through Telegram; no local database is used."""
+SUBSCRIPTION_CACHE_TTL_SECONDS = 5
+_subscription_cache: dict[int, tuple[float, bool]] = {}
+
+
+async def is_subscribed(bot, user_id: int, *, force_refresh: bool = False) -> bool:
+    """Check membership with a short cache to avoid a network request on every message.
+
+    The explicit subscription button always forces a live check, so a user can
+    continue immediately after joining. Cache failures are not stored.
+    """
+    now = time.monotonic()
+    cached = _subscription_cache.get(user_id)
+    if not force_refresh and cached and now - cached[0] < SUBSCRIPTION_CACHE_TTL_SECONDS:
+        return cached[1]
+
     try:
-        member = await bot.get_chat_member(chat_id=SUBSCRIPTION_CHANNEL, user_id=user_id)
-        return member.status in ("creator", "administrator", "member") or (
+        member = await bot.get_chat_member(
+            chat_id=SUBSCRIPTION_CHANNEL,
+            user_id=user_id,
+            read_timeout=4,
+            write_timeout=4,
+            connect_timeout=4,
+            pool_timeout=4,
+        )
+        subscribed = member.status in ("creator", "administrator", "member") or (
             member.status == "restricted" and bool(getattr(member, "is_member", False))
         )
-    except Exception:
-        logger.exception(
-            "Could not check subscription for Telegram ID %s. Ensure the bot is an admin of %s.",
+        _subscription_cache[user_id] = (time.monotonic(), subscribed)
+        return subscribed
+    except Exception as exc:
+        logger.warning(
+            "Subscription check failed for Telegram ID %s (check bot admin permissions for %s): %s",
             user_id,
             SUBSCRIPTION_CHANNEL,
+            exc,
         )
         return False
 
@@ -1204,44 +1246,26 @@ async def send_subscription_prompt(message, *, edit=False):
 
 
 def get_event_location_keyboard():
-    # Back is an INLINE keyboard button here.
-    # It is not sent as a separate ReplyKeyboard message.
+    # Only the three currently supported event locations are shown.
+    # Callback data keeps the internal names used by SQLite and Baserow.
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "📍 Tashkent",
-                    callback_data="Tashkent",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📍 Tashkent Region",
+                    "📍 Toshkent viloyat",
                     callback_data="Tashkent Region",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "📍 Sirdaryo",
-                    callback_data="Sirdaryo",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📍 Bukhara",
-                    callback_data="Bukhara",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📍 Andijan",
-                    callback_data="Andijan",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📍 Fergana",
+                    "📍 Fargona",
                     callback_data="Fergana",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Syrdarya",
+                    callback_data="Sirdaryo",
                 )
             ],
         ]
@@ -1345,7 +1369,7 @@ async def start(
     user_id = update.effective_user.id
     remember_broadcast_recipient(update.effective_user)
 
-    if not await is_subscribed(context.bot, user_id):
+    if not await is_subscribed(context.bot, user_id, force_refresh=True):
         await send_subscription_prompt(update.effective_message)
         return MENU_SECTION
 
@@ -1375,7 +1399,7 @@ async def restart(
     user_id = update.effective_user.id
     remember_broadcast_recipient(update.effective_user)
 
-    if not await is_subscribed(context.bot, user_id):
+    if not await is_subscribed(context.bot, user_id, force_refresh=True):
         await send_subscription_prompt(update.effective_message)
         return MENU_SECTION
 
@@ -1404,7 +1428,7 @@ async def check_subscription_callback(
     query = update.callback_query
     user_id = query.from_user.id
 
-    if not await is_subscribed(context.bot, user_id):
+    if not await is_subscribed(context.bot, user_id, force_refresh=True):
         await query.answer(
             "I couldn't confirm your subscription. Join the channel first, then try again.",
             show_alert=True,
@@ -2766,7 +2790,7 @@ async def broadcast_from_announcement_channel(
             or message.animation or message.audio or message.voice or message.video_note):
         return
 
-    recipient_ids = get_broadcast_recipient_ids()
+    recipient_ids = await asyncio.to_thread(get_broadcast_recipient_ids)
     sent = blocked = failed = 0
     for recipient_id in recipient_ids:
         try:
@@ -2926,10 +2950,10 @@ def main():
             # =========================================================
 
             LOCATION: [
-                # All six event locations.
+                # Only the three enabled event locations.
                 CallbackQueryHandler(
                     location_chosen,
-                    pattern=r"^(Tashkent|Tashkent Region|Sirdaryo|Bukhara|Andijan|Fergana)$",
+                    pattern=r"^(Tashkent Region|Sirdaryo|Fergana)$",
                 ),
 
                 CallbackQueryHandler(
@@ -3098,16 +3122,15 @@ def main():
         "Bot started. Press Ctrl+C to stop."
     )
 
+    # Python 3.14 no longer implicitly creates a current event loop.
+    # PTB's run_polling() expects one to exist when it calls get_event_loop().
+    # Create and register it explicitly before handing control to PTB.
     try:
         asyncio.get_event_loop()
     except RuntimeError:
-        asyncio.set_event_loop(
-            asyncio.new_event_loop()
-        )
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app.run_polling(
-        drop_pending_updates=False
-    )
+    app.run_polling(drop_pending_updates=False)
 
 
 
