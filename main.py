@@ -54,8 +54,12 @@ if not BOT_TOKEN:
     )
 
 if not BASEROW_TOKEN:
-    raise RuntimeError(
-        "BASEROW_TOKEN is not configured. Set BASEROW_TOKEN as an environment variable."
+    # Keep the bot process alive so the platform smoke-test can complete.
+    # Baserow-backed registration/profile syncing requires BASEROW_TOKEN to be
+    # configured in the hosting platform's environment settings.
+    logging.warning(
+        "BASEROW_TOKEN is not configured. The bot can start, but Baserow "
+        "features will not work until BASEROW_TOKEN is set."
     )
 
 WEBSITE_URL = "https://articular.uz"
@@ -80,6 +84,8 @@ BASEROW_TABLE_IDS = {
     "Sirdaryo": "1241781",
     "Andijan": "1241953",
     "Fergana": "1241951",
+    # Replace this placeholder with the actual Baserow table ID for Navoiy.
+    "Navoiy": "YOUR_NAVOIY_BASEROW_TABLE_ID",
 }
 
 
@@ -88,20 +94,27 @@ BASEROW_TABLE_IDS = {
 # =====================================================================
 
 LOCATIONS = {
+    # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
-    "Sirdaryo": "https://t.me/+EVBsvVhvjCw5YzFi",
+    "Sirdaryo": "https://t.me/articularuzsyrdarya",
     "Fergana": "https://t.me/articularuzfargona",
+    "Andijan": "https://t.me/articularuzandijon",
+    "Bukhara": "https://t.me/articularuzbuxoro",
+    "Navoiy": "https://t.me/articularuznavoiy",
 }
 
 # Only these locations can be selected for a new registration.
+# Tashkent and Tashkent Region are represented by one shared location.
 VALID_CITIES = (
     "Tashkent Region",
-    "Fergana",
     "Sirdaryo",
+    "Fergana",
+    "Andijan",
+    "Bukhara",
+    "Navoiy",
 )
 
-# Retain old city tables for safe cleanup of legacy registrations, but never
-# expose these locations in the event keyboard.
+# Retain old city tables for safe cleanup of legacy registrations.
 ALL_CITY_TABLES = (
     "Tashkent",
     "Tashkent Region",
@@ -109,6 +122,7 @@ ALL_CITY_TABLES = (
     "Sirdaryo",
     "Andijan",
     "Fergana",
+    "Navoiy",
 )
 
 
@@ -596,10 +610,15 @@ async def cancel_user_in_baserow(
 # SQLITE DATABASE
 # =====================================================================
 
-DB_PATH = os.path.join(
+# All persistent files must live inside DATA_DIR. Botxona provides this
+# environment variable; the local fallback keeps development convenient.
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "registrations.db",
+    "data",
 )
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(DATA_DIR, "registrations.db")
 
 
 def get_db_connection():
@@ -1069,10 +1088,7 @@ def backup_database():
     if not os.path.exists(DB_PATH):
         return
 
-    backup_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "db_backups",
-    )
+    backup_dir = os.path.join(DATA_DIR, "db_backups")
 
     os.makedirs(
         backup_dir,
@@ -1246,26 +1262,44 @@ async def send_subscription_prompt(message, *, edit=False):
 
 
 def get_event_location_keyboard():
-    # Only the three currently supported event locations are shown.
+    # Tashkent and Tashkent Region share one group and one event option.
     # Callback data keeps the internal names used by SQLite and Baserow.
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "📍 Toshkent viloyat",
+                    "📍 Tashkent / Tashkent Region",
                     callback_data="Tashkent Region",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📍 Fargona",
-                    callback_data="Fergana",
                 )
             ],
             [
                 InlineKeyboardButton(
                     "📍 Syrdarya",
                     callback_data="Sirdaryo",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Fergana",
+                    callback_data="Fergana",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Andijan",
+                    callback_data="Andijan",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Buhoro",
+                    callback_data="Bukhara",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📍 Navoiy",
+                    callback_data="Navoiy",
                 )
             ],
         ]
@@ -2832,15 +2866,13 @@ def main():
             "Set BOT_TOKEN as an environment variable."
         )
 
-    if (
-        not BASEROW_TOKEN
-        or BASEROW_TOKEN == "YOUR_NEW_BASEROW_TOKEN"
-    ):
-        raise RuntimeError(
-            "BASEROW_TOKEN is not configured. "
-            "Set BASEROW_TOKEN as an environment variable."
+    if not BASEROW_TOKEN or BASEROW_TOKEN == "YOUR_NEW_BASEROW_TOKEN":
+        logger.warning(
+            "BASEROW_TOKEN is missing. Bot startup will continue, but "
+            "Baserow-backed features require BASEROW_TOKEN in environment settings."
         )
 
+    os.makedirs(DATA_DIR, exist_ok=True)
     init_db()
     backup_database()
 
@@ -2950,10 +2982,10 @@ def main():
             # =========================================================
 
             LOCATION: [
-                # Only the three enabled event locations.
+                # All enabled event locations.
                 CallbackQueryHandler(
                     location_chosen,
-                    pattern=r"^(Tashkent Region|Sirdaryo|Fergana)$",
+                    pattern=r"^(Tashkent Region|Sirdaryo|Fergana|Andijan|Bukhara|Navoiy)$",
                 ),
 
                 CallbackQueryHandler(
@@ -3134,5 +3166,11 @@ def main():
 
 
 
+# =====================================================================
+# RUN
+# =====================================================================
+
 if __name__ == "__main__":
     main()
+
+
