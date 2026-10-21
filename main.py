@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -215,7 +215,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
 
     thread = threading.Thread(
         target=server.serve_forever,
@@ -650,23 +650,14 @@ async def cancel_user_in_baserow(
         return False
 
     def clear_users():
-        # Cancellation must never create a new/empty Users row. Patch existing
-        # rows only; if no row exists, there is nothing to clear.
-        rows = _get_baserow_rows_sync("Users", user_id)
-        for row in rows:
-            request = urllib.request.Request(
-                _baserow_url("Users", row["id"]),
-                data=json.dumps({"Event Location": ""}).encode("utf-8"),
-                method="PATCH",
-                headers=_baserow_headers(),
-            )
-            with urllib.request.urlopen(request, timeout=10) as response:
-                if not 200 <= response.status < 300:
-                    raise RuntimeError(
-                        f"Users location clear failed: HTTP {response.status}"
-                    )
-        for duplicate in rows[1:]:
-            _delete_baserow_row_sync("Users", duplicate["id"])
+        _sync_users_table_sync(
+            user_id=user_id,
+            username=username,
+            full_name=full_name,
+            age=age,
+            phone=phone,
+            location="",
+        )
 
     tasks = [
         asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
@@ -1253,7 +1244,6 @@ def get_main_menu_keyboard():
         [
             [KeyboardButton("👤 Profile")],
             [KeyboardButton("🎯 Choose an event")],
-            [KeyboardButton("🌐 Our website")],
         ],
         resize_keyboard=True,
     )
@@ -1870,11 +1860,9 @@ async def phone(
 
     elif update.message.text:
         text = update.message.text.strip()
-        # Accept common human formatting such as +998 90 123-45-67,
-        # then validate the normalized international-style digit sequence.
-        normalized_phone = re.sub(r"[\s().-]", "", text)
-        if re.fullmatch(r"\+?\d{7,15}", normalized_phone):
-            phone_number = normalized_phone
+
+        if re.match(r"^\+?\d{7,15}$", text):
+            phone_number = text
 
     if not phone_number:
         await update.message.reply_text(
@@ -2102,14 +2090,6 @@ async def menu_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     text = update.message.text.strip()
-
-    if text == "🌐 Our website":
-        await update.message.reply_text(
-            f"Visit the official ArticularUz website: {WEBSITE_URL}",
-            reply_markup=get_main_menu_keyboard(),
-            disable_web_page_preview=True,
-        )
-        return MENU_SECTION
 
     if text == "👤 Profile":
         user_id = update.effective_user.id
@@ -2616,11 +2596,12 @@ async def cancel_location_from_profile(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     user_id = update.effective_user.id
-    profile = await get_user_with_baserow_fallback(user_id)
+    await get_user_with_baserow_fallback(user_id)
     active_registration = get_active_event_registration(user_id)
 
     if not active_registration:
         # Also repair historical stale Baserow city rows when SQLite says none.
+        profile = await get_user_with_baserow_fallback(user_id)
         if profile:
             ok = await cancel_user_in_baserow(
                 user_id=user_id,
