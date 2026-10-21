@@ -8,7 +8,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from concurrent.futures import ThreadPoolExecutor
@@ -73,22 +72,20 @@ SUBSCRIPTION_CHANNEL = "@articularuz"
 SUBSCRIPTION_CHANNEL_URL = "https://t.me/articularuz"
 
 
-
 # =====================================================================
 # BASEROW TABLES
 # =====================================================================
 
-# IMPORTANT:
-# Replace the three YOUR_... values with the actual Baserow table IDs.
+# Keep each key aligned with its corresponding Baserow table ID.
 BASEROW_TABLE_IDS = {
     "Users": "1237476",
     "Tashkent": "1241776",
     "Tashkent Region": "1241955",
     "Bukhara": "1241780",
-    "Sirdaryo": "1241781",
+    "Sirdaryo": "1275321",
     "Andijan": "1241953",
     "Fergana": "1275284",
-    # Replace this placeholder with the actual Baserow table ID for Navoiy.
+    # Navoiy table ID from the current Baserow setup.
     "Navoiy": "1274288",
 }
 
@@ -100,8 +97,8 @@ BASEROW_TABLE_IDS = {
 LOCATIONS = {
     # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
-    # Replace these placeholders with your group invite links.
-    "Sirdaryo": "https://t.me/articularuzsyrdarya ",
+    # These links must point to the official group for each event location.
+    "Sirdaryo": "https://t.me/articularuzsyrdarya",
     "Fergana": "https://t.me/articularuzfargona",
     "Andijan": "https://t.me/articularuzandijon",
     "Bukhara": "https://t.me/articularuzbuxoro",
@@ -119,6 +116,30 @@ VALID_CITIES = (
     "Navoiy",
 )
 
+# Canonical location names used in buttons, messages, SQLite, and Baserow.
+# These aliases let older records continue to work without displaying mixed names.
+LOCATION_ALIASES = {
+    "Tashkent": "Tashkent Region",
+    "Tashkent / Tashkent Region": "Tashkent Region",
+    "Tashkent/Tashkent Region": "Tashkent Region",
+    "Tashkent Region": "Tashkent Region",
+    "Syrdarya": "Sirdaryo",
+    "Sirdaryo": "Sirdaryo",
+    "Fergana": "Fergana",
+    "Andijan": "Andijan",
+    "Buhoro": "Bukhara",
+    "Bukhara": "Bukhara",
+    "Navoiy": "Navoiy",
+}
+
+def normalize_location(location: str | None) -> str:
+    """Return the single canonical display/storage name for a location."""
+    if not location:
+        return ""
+    cleaned = str(location).strip()
+    return LOCATION_ALIASES.get(cleaned, cleaned)
+
+
 # Retain old city tables for safe cleanup of legacy registrations.
 ALL_CITY_TABLES = (
     "Tashkent",
@@ -129,7 +150,6 @@ ALL_CITY_TABLES = (
     "Fergana",
     "Navoiy",
 )
-
 
 
 # =====================================================================
@@ -219,6 +239,7 @@ def _baserow_payload(
     location: str,
     registered_at: str | None = None,
 ):
+    location = normalize_location(location)
     payload = {
         "Full Name": full_name,
         "Age": age,
@@ -643,7 +664,7 @@ async def cancel_user_in_baserow(
 # SQLITE DATABASE
 # =====================================================================
 
-# All persistent files must live inside DATA_DIR. Use Botxona's configured
+# All persistent files must live inside DATA_DIR. Use the hosting platform's configured
 # directory, defaulting to /data rather than writing beside the source code.
 DATA_DIR = os.environ.get("DATA_DIR", "/data").strip() or "/data"
 DATA_DIR = os.path.abspath(DATA_DIR)
@@ -738,6 +759,24 @@ def init_db():
             )
             """
         )
+
+        # Normalize older location spellings so the database uses one name per location.
+        location_migrations = {
+            "Tashkent": "Tashkent Region",
+            "Tashkent / Tashkent Region": "Tashkent Region",
+            "Tashkent/Tashkent Region": "Tashkent Region",
+            "Syrdarya": "Sirdaryo",
+            "Buhoro": "Bukhara",
+        }
+        for old_name, canonical_name in location_migrations.items():
+            cursor.execute(
+                "UPDATE users SET location = ? WHERE location = ?",
+                (canonical_name, old_name),
+            )
+            cursor.execute(
+                "UPDATE event_registrations SET location = ? WHERE location = ?",
+                (canonical_name, old_name),
+            )
 
         # Keep the newest active registration if old data contains duplicates.
         cursor.execute(
@@ -848,6 +887,7 @@ def save_user(
     phone: str,
     location: str,
 ):
+    location = normalize_location(location)
     conn = get_db_connection()
 
     try:
@@ -909,7 +949,17 @@ def get_user(user_id: int):
             (user_id,),
         )
 
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        if row:
+            canonical_location = normalize_location(row[5])
+            if canonical_location != (row[5] or ""):
+                conn.execute(
+                    "UPDATE users SET location = ? WHERE user_id = ?",
+                    (canonical_location, user_id),
+                )
+                conn.commit()
+                row = (*row[:5], canonical_location)
+        return row
 
     finally:
         conn.close()
@@ -963,6 +1013,7 @@ def get_active_event_registration(user_id: int):
 
 def create_event_registration(user_id: int, location: str):
     """Atomically create at most one active event registration per user."""
+    location = normalize_location(location)
     if location not in VALID_CITIES:
         raise ValueError(f"Invalid event location: {location!r}")
 
@@ -1063,7 +1114,7 @@ async def get_user_with_baserow_fallback(user_id: int):
             return get_user(user_id)
 
     # SQLite is authoritative once a local profile exists. In particular, an
-    # empty location means the user cancelled or has not registered for an
+    # empty location means the user canceled or has not registered for an
     # event; do not query Baserow and accidentally restore stale remote state.
     # This also avoids a slow Baserow request on routine menu/profile actions.
     if local_user:
@@ -1088,7 +1139,7 @@ async def get_user_with_baserow_fallback(user_id: int):
     except (TypeError, ValueError):
         age_value = 0
     phone_value = str(row.get("Phone") or "")
-    remote_location = row.get("Event Location") or ""
+    remote_location = normalize_location(row.get("Event Location"))
 
     # Preserve locally edited fields if SQLite already has a profile; otherwise
     # use Baserow as the recovery source.
@@ -1098,7 +1149,7 @@ async def get_user_with_baserow_fallback(user_id: int):
         age_value = local_user[3] or age_value
         phone_value = local_user[4] or phone_value
         # Local SQLite is authoritative when a local profile exists. In
-        # particular, a blank local location means the user cancelled; do not
+        # particular, a blank local location means the user canceled; do not
         # reactivate a stale remote location if a previous Baserow sync failed.
         remote_location = local_user[5] or ""
 
@@ -1171,7 +1222,6 @@ def get_main_menu_keyboard():
     )
 
 
-
 def get_back_keyboard():
     return ReplyKeyboardMarkup(
         [
@@ -1180,7 +1230,6 @@ def get_back_keyboard():
         ],
         resize_keyboard=True,
     )
-
 
 
 def get_profile_register_keyboard():
@@ -1299,13 +1348,13 @@ def get_event_location_keyboard():
         [
             [
                 InlineKeyboardButton(
-                    "📍 Tashkent / Tashkent Region",
+                    "📍 Tashkent Region",
                     callback_data="Tashkent Region",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "📍 Syrdarya",
+                    "📍 Sirdaryo",
                     callback_data="Sirdaryo",
                 )
             ],
@@ -1323,7 +1372,7 @@ def get_event_location_keyboard():
             ],
             [
                 InlineKeyboardButton(
-                    "📍 Buhoro",
+                    "📍 Bukhara",
                     callback_data="Bukhara",
                 )
             ],
@@ -1362,15 +1411,14 @@ def get_registered_event_keyboard():
     )
 
 
-
 def get_join_group_keyboard(location):
-    group_link = LOCATIONS.get(location, "")
+    canonical_location = normalize_location(location)
+    group_link = LOCATIONS.get(canonical_location, "").strip()
     if not group_link or "your_" in group_link:
         return None
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔗 Join group", url=group_link)]]
+        [[InlineKeyboardButton(f"🔗 Join {canonical_location} Group", url=group_link)]]
     )
-
 
 
 # =====================================================================
@@ -1404,19 +1452,16 @@ def format_user_info_message(
             "",
         ) or "N/A"
 
-    location = user_data.get(
-        "location",
-        "N/A",
-    ) or "N/A"
+    location = normalize_location(user_data.get("location")) or "N/A"
 
     return (
-        "Here is your personal information:\n\n"
+        "Here is your profile information:\n\n"
         f"👤 Name: {name}\n"
         f"🎂 Age: {age}\n"
         f"📞 Phone: {phone}\n"
         f"📱 Username: {username}\n"
         f"📍 Event location: {location}\n\n"
-        "Use the buttons below to change your profile "
+        "Use the buttons below to update your profile "
         "or return to the menu."
     )
 
@@ -1550,7 +1595,7 @@ def load_user_into_context(
         "age": db_age,
         "phone": db_phone or "",
         "telegram_username": db_username or "",
-        "location": db_location or "",
+        "location": normalize_location(db_location),
     })
 
 
@@ -1863,7 +1908,6 @@ async def phone(
     return LOCATION
 
 
-
 # =====================================================================
 # USERNAME
 # =====================================================================
@@ -2138,7 +2182,6 @@ async def menu_handler(
         return MENU_SECTION
 
 
-
     if text == "🎯 Choose an event":
         user_id = update.effective_user.id
 
@@ -2151,6 +2194,7 @@ async def menu_handler(
                 registered_location,
             ) = active_registration
 
+            registered_location = normalize_location(registered_location)
             context.user_data["location"] = registered_location
 
             # IMPORTANT:
@@ -2198,12 +2242,12 @@ async def location_chosen(
 
     await query.answer()
 
-    chosen = query.data
+    chosen = normalize_location(query.data)
     user_id = query.from_user.id
 
     if chosen not in VALID_CITIES:
         await query.edit_message_text(
-            "Unknown location."
+            "That event location is not recognized. Please choose an available location."
         )
 
         return MENU_SECTION
@@ -2217,6 +2261,7 @@ async def location_chosen(
             registered_location,
         ) = active_registration
 
+        registered_location = normalize_location(registered_location)
         context.user_data["location"] = registered_location
 
         await query.edit_message_text(
@@ -2303,7 +2348,7 @@ async def register_event_callback(
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    chosen = context.user_data.get("selected_event_location")
+    chosen = normalize_location(context.user_data.get("selected_event_location"))
 
     if chosen not in VALID_CITIES:
         await query.edit_message_text("No valid event location selected. Please choose a location again.")
@@ -2313,7 +2358,7 @@ async def register_event_callback(
     existing_user = await get_user_with_baserow_fallback(user_id)
     active_registration = get_active_event_registration(user_id)
     if active_registration:
-        registered_location = active_registration[1]
+        registered_location = normalize_location(active_registration[1])
         context.user_data["location"] = registered_location
         context.user_data.pop("selected_event_location", None)
         await query.edit_message_text(
@@ -2348,7 +2393,7 @@ async def register_event_callback(
     registration_id = create_event_registration(user_id, chosen)
     if registration_id is None:
         active_registration = get_active_event_registration(user_id)
-        registered_location = active_registration[1] if active_registration else "another location"
+        registered_location = normalize_location(active_registration[1]) if active_registration else "another location"
         await query.edit_message_text(
             "You already have an active event registration.\n"
             f"📍 Event location: {registered_location}"
@@ -2418,7 +2463,7 @@ async def cancel_event_preview_callback(
     )
 
     await query.edit_message_text(
-        "Event registration cancelled. ❌"
+        "Event registration canceled. ❌"
     )
 
     await query.message.reply_text(
@@ -2474,7 +2519,7 @@ async def cancel_registration_callback(
     user_id = query.from_user.id
     await get_user_with_baserow_fallback(user_id)
     active_registration = get_active_event_registration(user_id)
-    registered_location = active_registration[1] if active_registration else context.user_data.get("location", "")
+    registered_location = normalize_location(active_registration[1]) if active_registration else context.user_data.get("location", "")
 
     cancelled = cancel_latest_event_registration(user_id)
     if cancelled:
@@ -2501,7 +2546,7 @@ async def cancel_registration_callback(
         message = "No active event registration was found. I checked the online city tables for stale rows."
     else:
         message = (
-            "Your event registration has been cancelled. ❌\n\n"
+            "Your event registration has been canceled. ❌\n\n"
             "Your profile is still saved. ✅\n"
             "You can register for another location anytime."
         )
@@ -2540,17 +2585,23 @@ async def cancel_location_from_profile(
                 phone=profile[4] or "",
                 registered_city=profile[5] or "",
             )
+            if not ok:
+                await update.message.reply_text(
+                    "No active local registration was found, but the online database could not be fully checked. Please try again later.",
+                    reply_markup=get_back_keyboard(),
+                )
+                return LOCATION
         await update.message.reply_text(
             "You are not registered for any event location. 📍",
             reply_markup=get_back_keyboard(),
         )
         return LOCATION
 
-    registered_location = active_registration[1]
+    registered_location = normalize_location(active_registration[1])
     cancelled = cancel_latest_event_registration(user_id)
     if not cancelled:
         await update.message.reply_text(
-            "Your event registration could not be cancelled. Please try again.",
+            "Your event registration could not be canceled. Please try again.",
             reply_markup=get_back_keyboard(),
         )
         return LOCATION
@@ -2577,7 +2628,7 @@ async def cancel_location_from_profile(
     )
 
     await update.message.reply_text(
-        f"Your {registered_location} event registration has been cancelled. ❌\n\n"
+        f"Your {registered_location} event registration has been canceled. ❌\n\n"
         "Your profile information is still saved. ✅\n"
         "You can register for another location anytime."
     )
@@ -2783,7 +2834,7 @@ async def cancel(
     context.user_data.clear()
 
     await update.message.reply_text(
-        "Registration cancelled.\n\n"
+        "Registration canceled.\n\n"
         "Send /start to begin again.",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -3204,11 +3255,9 @@ def main():
         # token in its message. Do not print the exception or its token.
         logger.critical(
             "Telegram rejected BOT_TOKEN. Create a new token with BotFather "
-            "and update BOT_TOKEN in the Botxona environment settings."
+            "and update BOT_TOKEN in your hosting platform environment settings."
         )
         raise SystemExit(1) from None
-
-
 
 
 if __name__ == "__main__":
