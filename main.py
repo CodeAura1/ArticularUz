@@ -82,7 +82,7 @@ BASEROW_TABLE_IDS = {
     "Tashkent": "1241776",
     "Tashkent Region": "1241955",
     "Bukhara": "1241780",
-    "Sirdaryo": "1275321",
+    "Sirdaryo": "1241781",
     "Andijan": "1241953",
     "Fergana": "1275284",
     # Navoiy table ID from the current Baserow setup.
@@ -1342,10 +1342,16 @@ async def send_subscription_prompt(message, *, edit=False):
 
 
 def get_event_location_keyboard():
-    # Tashkent and Tashkent Region share one group and one event option.
-    # Callback data keeps the internal names used by SQLite and Baserow.
+    # Tashkent and Tashkent Region are separate visible buttons but share the
+    # canonical internal location, database record, and Telegram group.
     return InlineKeyboardMarkup(
         [
+            [
+                InlineKeyboardButton(
+                    "📍 Tashkent",
+                    callback_data="Tashkent",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     "📍 Tashkent Region",
@@ -3071,7 +3077,7 @@ def main():
                 # All enabled event locations.
                 CallbackQueryHandler(
                     location_chosen,
-                    pattern=r"^(Tashkent Region|Sirdaryo|Fergana|Andijan|Bukhara|Navoiy)$",
+                    pattern=r"^(Tashkent|Tashkent Region|Sirdaryo|Fergana|Andijan|Bukhara|Navoiy)$",
                 ),
 
                 CallbackQueryHandler(
