@@ -2540,12 +2540,6 @@ async def cancel_location_from_profile(
                 phone=profile[4] or "",
                 registered_city=profile[5] or "",
             )
-            if not ok:
-                await update.message.reply_text(
-                    "No active local registration was found, but the online database could not be fully checked. Please try again later.",
-                    reply_markup=get_back_keyboard(),
-                )
-                return LOCATION
         await update.message.reply_text(
             "You are not registered for any event location. 📍",
             reply_markup=get_back_keyboard(),
@@ -3220,5 +3214,3 @@ def main():
 if __name__ == "__main__":
     start_health_server()
     main()
-
-
