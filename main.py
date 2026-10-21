@@ -86,7 +86,7 @@ BASEROW_TABLE_IDS = {
     "Andijan": "1241953",
     "Fergana": "1241951",
     # Replace this placeholder with the actual Baserow table ID for Navoiy.
-    "Navoiy": "YOUR_NAVOIY_BASEROW_TABLE_ID",
+    "Navoiy": "1274288",
 }
 
 
