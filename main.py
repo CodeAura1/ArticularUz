@@ -1360,8 +1360,8 @@ def get_event_location_keyboard():
             ],
             [
                 InlineKeyboardButton(
-                    "📍 Sirdarya",
-                    callback_data="Sirdarya",
+                    "📍 Sirdaryo",
+                    callback_data="Sirdaryo",
                 )
             ],
             [
