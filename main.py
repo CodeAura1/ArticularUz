@@ -79,10 +79,9 @@ SUBSCRIPTION_CHANNEL_URL = "https://t.me/articularuz"
 # Keep each key aligned with its corresponding Baserow table ID.
 BASEROW_TABLE_IDS = {
     "Users": "1237476",
-    "Tashkent": "1241776",
     "Tashkent Region": "1241955",
     "Bukhara": "1241780",
-    "Sirdarya": "1241781",
+    "Sirdarya": "1275321",
     "Andijan": "1241953",
     "Fergana": "1275284",
     # Navoiy table ID from the current Baserow setup.
