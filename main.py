@@ -98,11 +98,11 @@ LOCATIONS = {
     # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
     # Replace these placeholders with your group invite links.
-    "Sirdaryo": "https://t.me/+your_sirdaryo_group_invite",
+    "Sirdaryo": "https://t.me/articularuzsyrdarya",
     "Fergana": "https://t.me/articularuzfargona",
     "Andijan": "https://t.me/articularuzandijon",
     "Bukhara": "https://t.me/articularuzbuxoro",
-    "Navoiy": "https://t.me/+your_navoiy_group_invite",
+    "Navoiy": "https://t.me/articularuznavoiy",
 }
 
 # Only these locations can be selected for a new registration.
