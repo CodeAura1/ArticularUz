@@ -9,7 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,7 +82,7 @@ BASEROW_TABLE_IDS = {
     "Tashkent": "1241776",
     "Tashkent Region": "1241955",
     "Bukhara": "1241780",
-    "Sirdaryo": "1241781",
+    "Sirdarya": "1241781",
     "Andijan": "1241953",
     "Fergana": "1275284",
     # Navoiy table ID from the current Baserow setup.
@@ -98,7 +98,7 @@ LOCATIONS = {
     # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
     # These links must point to the official group for each event location.
-    "Sirdaryo": "https://t.me/articularuzsyrdarya",
+    "Sirdarya": "https://t.me/articularuzsyrdarya",
     "Fergana": "https://t.me/articularuzfargona",
     "Andijan": "https://t.me/articularuzandijon",
     "Bukhara": "https://t.me/articularuzbuxoro",
@@ -106,10 +106,10 @@ LOCATIONS = {
 }
 
 # Only these locations can be selected for a new registration.
-# Tashkent and Tashkent Region are represented by one shared location.
+# Tashkent (Region) is represented by one shared location.
 VALID_CITIES = (
     "Tashkent Region",
-    "Sirdaryo",
+    "Sirdarya",
     "Fergana",
     "Andijan",
     "Bukhara",
@@ -123,8 +123,15 @@ LOCATION_ALIASES = {
     "Tashkent / Tashkent Region": "Tashkent Region",
     "Tashkent/Tashkent Region": "Tashkent Region",
     "Tashkent Region": "Tashkent Region",
-    "Syrdarya": "Sirdaryo",
-    "Sirdaryo": "Sirdaryo",
+    # Accept historical/alternate spellings, but always display/store Sirdarya.
+    "Sirdaryo": "Sirdarya",
+    "Sirdarya": "Sirdarya",
+    "Syrdarya": "Sirdarya",
+    "Syrdaryo": "Sirdarya",
+    "sirdaryo": "Sirdarya",
+    "sirdarya": "Sirdarya",
+    "syrdarya": "Sirdarya",
+    "syrdaryo": "Sirdarya",
     "Fergana": "Fergana",
     "Andijan": "Andijan",
     "Buhoro": "Bukhara",
@@ -137,7 +144,18 @@ def normalize_location(location: str | None) -> str:
     if not location:
         return ""
     cleaned = str(location).strip()
-    return LOCATION_ALIASES.get(cleaned, cleaned)
+    return LOCATION_ALIASES.get(
+        cleaned,
+        LOCATION_ALIASES.get(cleaned.casefold(), cleaned),
+    )
+
+
+def display_location(location: str | None) -> str:
+    """Return the user-facing label while preserving canonical storage names."""
+    canonical = normalize_location(location)
+    if canonical == "Tashkent Region":
+        return "Tashkent/Tashkent region"
+    return canonical
 
 
 # Retain old city tables for safe cleanup of legacy registrations.
@@ -145,7 +163,7 @@ ALL_CITY_TABLES = (
     "Tashkent",
     "Tashkent Region",
     "Bukhara",
-    "Sirdaryo",
+    "Sirdarya",
     "Andijan",
     "Fergana",
     "Navoiy",
@@ -197,7 +215,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
 
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
 
     thread = threading.Thread(
         target=server.serve_forever,
@@ -632,14 +650,23 @@ async def cancel_user_in_baserow(
         return False
 
     def clear_users():
-        _sync_users_table_sync(
-            user_id=user_id,
-            username=username,
-            full_name=full_name,
-            age=age,
-            phone=phone,
-            location="",
-        )
+        # Cancellation must never create a new/empty Users row. Patch existing
+        # rows only; if no row exists, there is nothing to clear.
+        rows = _get_baserow_rows_sync("Users", user_id)
+        for row in rows:
+            request = urllib.request.Request(
+                _baserow_url("Users", row["id"]),
+                data=json.dumps({"Event Location": ""}).encode("utf-8"),
+                method="PATCH",
+                headers=_baserow_headers(),
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if not 200 <= response.status < 300:
+                    raise RuntimeError(
+                        f"Users location clear failed: HTTP {response.status}"
+                    )
+        for duplicate in rows[1:]:
+            _delete_baserow_row_sync("Users", duplicate["id"])
 
     tasks = [
         asyncio.to_thread(_delete_user_from_city_sync, city, user_id)
@@ -765,16 +792,25 @@ def init_db():
             "Tashkent": "Tashkent Region",
             "Tashkent / Tashkent Region": "Tashkent Region",
             "Tashkent/Tashkent Region": "Tashkent Region",
-            "Syrdarya": "Sirdaryo",
+            # Consolidate all legacy spellings into the canonical name.
+            "Sirdaryo": "Sirdarya",
+            "Syrdaryo": "Sirdarya",
+            "Sirdaryo": "Sirdarya",
+            "Syrdarya": "Sirdarya",
+            "Syrdaryo": "Sirdarya",
+            "sirdaryo": "Sirdarya",
+            "syrdarya": "Sirdarya",
+            "syrdaryo": "Sirdarya",
             "Buhoro": "Bukhara",
         }
         for old_name, canonical_name in location_migrations.items():
             cursor.execute(
-                "UPDATE users SET location = ? WHERE location = ?",
+                "UPDATE users SET location = ? WHERE LOWER(TRIM(location)) = LOWER(?)",
                 (canonical_name, old_name),
             )
             cursor.execute(
-                "UPDATE event_registrations SET location = ? WHERE location = ?",
+                "UPDATE event_registrations SET location = ? "
+                "WHERE LOWER(TRIM(location)) = LOWER(?)",
                 (canonical_name, old_name),
             )
 
@@ -1217,6 +1253,7 @@ def get_main_menu_keyboard():
         [
             [KeyboardButton("👤 Profile")],
             [KeyboardButton("🎯 Choose an event")],
+            [KeyboardButton("🌐 Our website")],
         ],
         resize_keyboard=True,
     )
@@ -1342,26 +1379,20 @@ async def send_subscription_prompt(message, *, edit=False):
 
 
 def get_event_location_keyboard():
-    # Tashkent and Tashkent Region are separate visible buttons but share the
-    # canonical internal location, database record, and Telegram group.
+    # One visible button for the shared Tashkent-region event location.
+    # Keep the canonical callback value used by the registration handlers.
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "📍 Tashkent",
-                    callback_data="Tashkent",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📍 Tashkent Region",
+                    "📍 Tashkent/Tashkent region",
                     callback_data="Tashkent Region",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "📍 Sirdaryo",
-                    callback_data="Sirdaryo",
+                    "📍 Sirdarya",
+                    callback_data="Sirdarya",
                 )
             ],
             [
@@ -1423,7 +1454,7 @@ def get_join_group_keyboard(location):
     if not group_link or "your_" in group_link:
         return None
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"🔗 Join {canonical_location} Group", url=group_link)]]
+        [[InlineKeyboardButton(f"🔗 Join {display_location(canonical_location)} Group", url=group_link)]]
     )
 
 
@@ -1458,7 +1489,7 @@ def format_user_info_message(
             "",
         ) or "N/A"
 
-    location = normalize_location(user_data.get("location")) or "N/A"
+    location = display_location(user_data.get("location")) or "N/A"
 
     return (
         "Here is your profile information:\n\n"
@@ -1839,9 +1870,11 @@ async def phone(
 
     elif update.message.text:
         text = update.message.text.strip()
-
-        if re.match(r"^\+?\d{7,15}$", text):
-            phone_number = text
+        # Accept common human formatting such as +998 90 123-45-67,
+        # then validate the normalized international-style digit sequence.
+        normalized_phone = re.sub(r"[\s().-]", "", text)
+        if re.fullmatch(r"\+?\d{7,15}", normalized_phone):
+            phone_number = normalized_phone
 
     if not phone_number:
         await update.message.reply_text(
@@ -2070,6 +2103,14 @@ async def menu_handler(
 ) -> int:
     text = update.message.text.strip()
 
+    if text == "🌐 Our website":
+        await update.message.reply_text(
+            f"Visit the official ArticularUz website: {WEBSITE_URL}",
+            reply_markup=get_main_menu_keyboard(),
+            disable_web_page_preview=True,
+        )
+        return MENU_SECTION
+
     if text == "👤 Profile":
         user_id = update.effective_user.id
         existing_user = await get_user_with_baserow_fallback(user_id)
@@ -2208,7 +2249,7 @@ async def menu_handler(
             # ReplyKeyboard button/message.
             await update.message.reply_text(
                 "You are already registered! ✅\n\n"
-                f"📍 Event location: {registered_location}\n\n"
+                f"📍 Event location: {display_location(registered_location)}\n\n"
                 "You cannot register for another "
                 "location while this registration is active.",
                 reply_markup=get_registered_event_keyboard(),
@@ -2271,7 +2312,7 @@ async def location_chosen(
         context.user_data["location"] = registered_location
 
         await query.edit_message_text(
-            f"📍 You are already registered in {registered_location}."
+            f"📍 You are already registered in {display_location(registered_location)}."
         )
 
         await query.message.reply_text(
@@ -2332,7 +2373,7 @@ async def location_chosen(
         f"🎂 Age: {context.user_data.get('age')}\n"
         f"📞 Phone: {context.user_data.get('phone')}\n"
         f"📱 Username: {username_display}\n"
-        f"📍 Location: {chosen}"
+        f"📍 Location: {display_location(chosen)}"
     )
 
     await query.edit_message_text(
@@ -2369,7 +2410,7 @@ async def register_event_callback(
         context.user_data.pop("selected_event_location", None)
         await query.edit_message_text(
             "You are already registered! ✅\n\n"
-            f"📍 Event location: {registered_location}\n\n"
+            f"📍 Event location: {display_location(registered_location)}\n\n"
             "You cannot register for another location while this registration is active."
         )
         await query.message.reply_text(
@@ -2402,7 +2443,7 @@ async def register_event_callback(
         registered_location = normalize_location(active_registration[1]) if active_registration else "another location"
         await query.edit_message_text(
             "You already have an active event registration.\n"
-            f"📍 Event location: {registered_location}"
+            f"📍 Event location: {display_location(registered_location)}"
         )
         await query.message.reply_text(
             "You can cancel your current location or go back.",
@@ -2431,19 +2472,18 @@ async def register_event_callback(
 
     group_keyboard = get_join_group_keyboard(chosen)
     group_note = (
-        f"Press the button below to join the {chosen} group."
+        f"Press the button below to join the {display_location(chosen)} group."
         if group_keyboard
-        else f"The {chosen} group link has not been configured yet. Please contact an ArticularUZ administrator."
+        else f"The {display_location(chosen)} group link has not been configured yet. Please contact an ArticularUZ administrator."
     )
-    sync_note = "" if synced else "\n\n⚠️ Your registration is saved, but the online database sync failed temporarily. Please contact an administrator if this persists."
     summary = (
         "You're registered! ✅\n\n"
         f"👤 Name: {full_name_value}\n"
         f"🎂 Age: {age_value}\n"
         f"📞 Phone: {phone_value}\n"
         f"📱 Username: {username_value or 'No username'}\n"
-        f"📍 Location: {chosen}\n\n"
-        f"{group_note}{sync_note}"
+        f"📍 Location: {display_location(chosen)}\n\n"
+        f"{group_note}"
     )
     await query.edit_message_text(summary, reply_markup=group_keyboard)
     context.user_data.pop("selected_event_location", None)
@@ -2576,12 +2616,11 @@ async def cancel_location_from_profile(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     user_id = update.effective_user.id
-    await get_user_with_baserow_fallback(user_id)
+    profile = await get_user_with_baserow_fallback(user_id)
     active_registration = get_active_event_registration(user_id)
 
     if not active_registration:
         # Also repair historical stale Baserow city rows when SQLite says none.
-        profile = await get_user_with_baserow_fallback(user_id)
         if profile:
             ok = await cancel_user_in_baserow(
                 user_id=user_id,
@@ -2634,7 +2673,7 @@ async def cancel_location_from_profile(
     )
 
     await update.message.reply_text(
-        f"Your {registered_location} event registration has been canceled. ❌\n\n"
+        f"Your {display_location(registered_location)} event registration has been canceled. ❌\n\n"
         "Your profile information is still saved. ✅\n"
         "You can register for another location anytime."
     )
@@ -3077,7 +3116,7 @@ def main():
                 # All enabled event locations.
                 CallbackQueryHandler(
                     location_chosen,
-                    pattern=r"^(Tashkent|Tashkent Region|Sirdaryo|Fergana|Andijan|Bukhara|Navoiy)$",
+                    pattern=r"^(Tashkent|Tashkent Region|Sirdaryo|Sirdarya|Fergana|Andijan|Bukhara|Navoiy)$",
                 ),
 
                 CallbackQueryHandler(
@@ -3269,5 +3308,3 @@ def main():
 if __name__ == "__main__":
     start_health_server()
     main()
-
-
