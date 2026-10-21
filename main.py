@@ -87,7 +87,7 @@ BASEROW_TABLE_IDS = {
     "Bukhara": "1241780",
     "Sirdaryo": "1241781",
     "Andijan": "1241953",
-    "Fergana": "1241951",
+    "Fergana": "1275284",
     # Replace this placeholder with the actual Baserow table ID for Navoiy.
     "Navoiy": "1274288",
 }
@@ -2500,11 +2500,19 @@ async def cancel_registration_callback(
     if not cancelled:
         message = "No active event registration was found. I checked the online city tables for stale rows."
     else:
-        message = "Your event registration has been cancelled. ❌\n\nYour profile is still saved. ✅"
-    if not synced:
-        message += "\n\n⚠️ The online database could not be fully updated. Please contact an administrator."
+        message = (
+            "Your event registration has been cancelled. ❌\n\n"
+            "Your profile is still saved. ✅\n"
+            "You can register for another location anytime."
+        )
+
     await query.edit_message_text(message)
-    await query.message.reply_text("Choose an option from the menu below:", reply_markup=get_main_menu_keyboard())
+
+    await query.message.reply_text(
+        "Choose an option from the menu below:",
+        reply_markup=get_main_menu_keyboard()
+    )
+
     return MENU_SECTION
 
 
@@ -2573,16 +2581,18 @@ async def cancel_location_from_profile(
         phone=context.user_data.get("phone", ""),
         registered_city=registered_location,
     )
-    suffix = "" if synced else "\n\n⚠️ The local cancellation succeeded, but the online database could not be fully updated. Please contact an administrator."
+
     await update.message.reply_text(
         f"Your {registered_location} event registration has been cancelled. ❌\n\n"
         "Your profile information is still saved. ✅\n"
-        "You can register for another location anytime." + suffix,
+        "You can register for another location anytime."
     )
+
     await update.message.reply_text(
         "📍 Choose a new event location:",
         reply_markup=get_event_location_keyboard(),
     )
+
     return LOCATION
 
 
