@@ -123,15 +123,8 @@ LOCATION_ALIASES = {
     "Tashkent / Tashkent Region": "Tashkent Region",
     "Tashkent/Tashkent Region": "Tashkent Region",
     "Tashkent Region": "Tashkent Region",
-    # Accept historical/alternate spellings, but always display/store Sirdaryo.
-    "Sirdaryo": "Sirdaryo",
-    "Sirdarya": "Sirdaryo",
     "Syrdarya": "Sirdaryo",
-    "Syrdaryo": "Sirdaryo",
-    "sirdaryo": "Sirdaryo",
-    "sirdarya": "Sirdaryo",
-    "syrdarya": "Sirdaryo",
-    "syrdaryo": "Sirdaryo",
+    "Sirdaryo": "Sirdaryo",
     "Fergana": "Fergana",
     "Andijan": "Andijan",
     "Buhoro": "Bukhara",
@@ -144,10 +137,7 @@ def normalize_location(location: str | None) -> str:
     if not location:
         return ""
     cleaned = str(location).strip()
-    return LOCATION_ALIASES.get(
-        cleaned,
-        LOCATION_ALIASES.get(cleaned.casefold(), cleaned),
-    )
+    return LOCATION_ALIASES.get(cleaned, cleaned)
 
 
 # Retain old city tables for safe cleanup of legacy registrations.
@@ -775,23 +765,16 @@ def init_db():
             "Tashkent": "Tashkent Region",
             "Tashkent / Tashkent Region": "Tashkent Region",
             "Tashkent/Tashkent Region": "Tashkent Region",
-            # Consolidate all legacy spellings into the canonical name.
-            "Sirdarya": "Sirdaryo",
             "Syrdarya": "Sirdaryo",
-            "Syrdaryo": "Sirdaryo",
-            "sirdarya": "Sirdaryo",
-            "syrdarya": "Sirdaryo",
-            "syrdaryo": "Sirdaryo",
             "Buhoro": "Bukhara",
         }
         for old_name, canonical_name in location_migrations.items():
             cursor.execute(
-                "UPDATE users SET location = ? WHERE LOWER(TRIM(location)) = LOWER(?)",
+                "UPDATE users SET location = ? WHERE location = ?",
                 (canonical_name, old_name),
             )
             cursor.execute(
-                "UPDATE event_registrations SET location = ? "
-                "WHERE LOWER(TRIM(location)) = LOWER(?)",
+                "UPDATE event_registrations SET location = ? WHERE location = ?",
                 (canonical_name, old_name),
             )
 
@@ -3286,3 +3269,5 @@ def main():
 if __name__ == "__main__":
     start_health_server()
     main()
+
+
