@@ -98,7 +98,7 @@ LOCATIONS = {
     # Tashkent and Tashkent Region use the same Telegram group.
     "Tashkent Region": "https://t.me/articularuztoshkent",
     # Replace these placeholders with your group invite links.
-    "Sirdaryo": "https://t.me/articularuzsyrdarya",
+    "Sirdaryo": "https://t.me/articularuzsyrdarya ",
     "Fergana": "https://t.me/articularuzfargona",
     "Andijan": "https://t.me/articularuzandijon",
     "Bukhara": "https://t.me/articularuzbuxoro",
